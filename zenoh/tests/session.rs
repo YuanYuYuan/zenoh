@@ -62,6 +62,15 @@ async fn close_session(peer01: Session, peer02: Session) {
     ztimeout!(peer02.close().res_async()).unwrap();
 }
 
+async fn close_brokered_session(peer01: Session, peer02: Session, router: Session) {
+    println!("[  ][01f] Closing peer02 session");
+    ztimeout!(peer01.close().res_async()).unwrap();
+    println!("[  ][02f] Closing peer02 session");
+    ztimeout!(peer02.close().res_async()).unwrap();
+    println!("[  ][02f] Closing router session");
+    ztimeout!(router.close().res_async()).unwrap();
+}
+
 async fn test_session_pubsub(peer01: &Session, peer02: &Session) {
     let key_expr = "test/session";
 
@@ -161,11 +170,46 @@ async fn test_session_qryrep(peer01: &Session, peer02: &Session) {
     }
 }
 
+async fn open_brokered_session(endpoints: &[&str]) -> (Session, Session, Session) {
+    // Open the sessions
+    let mut config = config::peer();
+    config.connect.endpoints = endpoints
+        .iter()
+        .map(|e| e.parse().unwrap())
+        .collect::<Vec<_>>();
+    config.scouting.multicast.set_enabled(Some(false)).unwrap();
+    println!("[  ][01e] Opening peer01 session");
+    let peer01 = ztimeout!(zenoh::open(config).res_async()).unwrap();
+
+    let mut config = config::peer();
+    config.connect.endpoints = endpoints
+        .iter()
+        .map(|e| e.parse().unwrap())
+        .collect::<Vec<_>>();
+    config.scouting.multicast.set_enabled(Some(false)).unwrap();
+    println!("[  ][02e] Opening peer02 session");
+    let peer02 = ztimeout!(zenoh::open(config).res_async()).unwrap();
+
+    let mut config = config::default();
+    config
+        .set_mode(Some(zenoh::config::WhatAmI::Router))
+        .unwrap();
+    config.listen.endpoints = endpoints
+        .iter()
+        .map(|e| e.parse().unwrap())
+        .collect::<Vec<_>>();
+    config.scouting.multicast.set_enabled(Some(false)).unwrap();
+    println!("[  ][03e] Opening router session");
+    let router = ztimeout!(zenoh::open(config).res_async()).unwrap();
+
+    (peer01, peer02, router)
+}
+
 #[test]
 fn zenoh_session() {
     task::block_on(async {
         zasync_executor_init!();
-        let _ = env_logger::try_init();
+        env_logger::try_init().unwrap_or_default();
 
         let (peer01, peer02) = open_session(&["tcp/127.0.0.1:17447"]).await;
         futures::future::join_all([
@@ -173,5 +217,20 @@ fn zenoh_session() {
             test_session_qryrep(&peer01, &peer02).boxed()
         ]).await;
         close_session(peer01, peer02).await;
+    });
+}
+
+#[test]
+fn zenoh_session_brokered() {
+    task::block_on(async {
+        zasync_executor_init!();
+        env_logger::try_init().unwrap_or_default();
+
+        let (peer01, peer02, router) = open_brokered_session(&["tcp/127.0.0.1:17448"]).await;
+        futures::future::join_all([
+            test_session_pubsub(&peer01, &peer02).boxed(),
+            test_session_qryrep(&peer01, &peer02).boxed()
+        ]).await;
+        close_brokered_session(peer01, peer02, router).await;
     });
 }
