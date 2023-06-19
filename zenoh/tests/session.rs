@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use zenoh::prelude::r#async::*;
 use zenoh_core::zasync_executor_init;
+use futures::FutureExt as _;
 
 const TIMEOUT: Duration = Duration::from_secs(60);
 const SLEEP: Duration = Duration::from_secs(1);
@@ -167,8 +168,10 @@ fn zenoh_session() {
         let _ = env_logger::try_init();
 
         let (peer01, peer02) = open_session(&["tcp/127.0.0.1:17447"]).await;
-        test_session_pubsub(&peer01, &peer02).await;
-        test_session_qryrep(&peer01, &peer02).await;
+        futures::future::join_all([
+            test_session_pubsub(&peer01, &peer02).boxed(),
+            test_session_qryrep(&peer01, &peer02).boxed()
+        ]).await;
         close_session(peer01, peer02).await;
     });
 }
