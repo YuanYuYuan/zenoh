@@ -49,9 +49,10 @@ jobs:
       - name: Run tests
         uses: actions-rs/cargo@v1
         with:
-          working-directory: ./zenoh/tests
+          # working-directory: ./zenoh/tests
           command: nextest
-          args: run three_node_combination two_node_combination
+          args: run
+          # args: run three_node_combination two_node_combination
         env:
           RUST_LOG: zenoh::net::routing::queries=trace
           ASYNC_STD_THREAD_COUNT: 4
