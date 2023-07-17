@@ -28,24 +28,27 @@ async fn main() {
     let session = zenoh::open(config).res().await.unwrap();
 
     println!("Sending Query '{selector}'...");
-    let replies = match value {
-        Some(value) => session.get(&selector).with_value(value),
-        None => session.get(&selector),
-    }
-    .target(target)
-    .timeout(timeout)
-    .res()
-    .await
-    .unwrap();
-    while let Ok(reply) = replies.recv_async().await {
-        match reply.sample {
-            Ok(sample) => println!(
-                ">> Received ('{}': '{}')",
-                sample.key_expr.as_str(),
-                sample.value,
-            ),
-            Err(err) => println!(">> Received (ERROR: '{}')", String::try_from(&err).unwrap()),
+    loop {
+        let replies = match value.clone() {
+            Some(value) => session.get(&selector).with_value(value),
+            None => session.get(&selector),
         }
+        .target(target)
+        .timeout(timeout)
+        .res()
+        .await
+        .unwrap();
+        while let Ok(reply) = replies.recv_async().await {
+            match reply.sample {
+                Ok(sample) => println!(
+                    ">> Received ('{}': '{}')",
+                    sample.key_expr.as_str(),
+                    sample.value,
+                ),
+                Err(err) => println!(">> Received (ERROR: '{}')", String::try_from(&err).unwrap()),
+            }
+        }
+        async_std::task::sleep(std::time::Duration::from_millis(10)).await;
     }
 }
 
