@@ -48,7 +48,7 @@ async fn main() {
                 Err(err) => println!(">> Received (ERROR: '{}')", String::try_from(&err).unwrap()),
             }
         }
-        async_std::task::sleep(std::time::Duration::from_millis(10)).await;
+        // async_std::task::sleep(std::time::Duration::from_millis(10)).await;
     }
 }
 
