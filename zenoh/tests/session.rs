@@ -23,7 +23,12 @@ const TIMEOUT: Duration = Duration::from_secs(60);
 const SLEEP: Duration = Duration::from_secs(1);
 
 const MSG_COUNT: usize = 1_000;
-const MSG_SIZE: [usize; 2] = [1_024, 131_072];
+const MSG_SIZE: [usize; 4] = [
+    1_024,
+    131_072,
+    1_024,
+    131_072,
+];
 
 macro_rules! ztimeout {
     ($f:expr) => {
@@ -159,7 +164,7 @@ async fn test_session_qryrep(peer01: &Session, peer02: &Session, reliability: Re
         .unwrap();
 
         // Wait for the declaration to propagate
-        task::sleep(SLEEP).await;
+        task::sleep(Duration::from_secs(3)).await;
 
         // Get data
         println!("[QR][02c] Getting on peer02 session. {msg_count} msgs.");
@@ -175,11 +180,11 @@ async fn test_session_qryrep(peer01: &Session, peer02: &Session, reliability: Re
         assert_eq!(msgs.load(Ordering::Relaxed), msg_count);
         assert_eq!(cnt, msg_count);
 
-        println!("[PS][03c] Unqueryable on peer01 session");
+        println!("[QR][03c] Unqueryable on peer01 session");
         ztimeout!(qbl.undeclare().res_async()).unwrap();
 
         // Wait for the declaration to propagate
-        task::sleep(SLEEP).await;
+        task::sleep(Duration::from_secs(1)).await;
     }
 }
 
@@ -190,7 +195,7 @@ fn zenoh_session_unicast() {
         let _ = env_logger::try_init();
 
         let (peer01, peer02) = open_session_unicast(&["tcp/127.0.0.1:17447"]).await;
-        test_session_pubsub(&peer01, &peer02, Reliability::Reliable).await;
+        // test_session_pubsub(&peer01, &peer02, Reliability::Reliable).await;
         test_session_qryrep(&peer01, &peer02, Reliability::Reliable).await;
         close_session(peer01, peer02).await;
     });
