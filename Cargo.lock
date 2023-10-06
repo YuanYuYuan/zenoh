@@ -4718,6 +4718,7 @@ dependencies = [
  "async-std",
  "async-trait",
  "log",
+ "tokio",
  "zenoh-core",
  "zenoh-link-commons",
  "zenoh-protocol",

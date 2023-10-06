@@ -11,15 +11,13 @@
 // Contributors:
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
-use async_std::net::{SocketAddr, TcpListener, TcpStream};
+use async_std::net::SocketAddr;
 use async_std::prelude::*;
-use async_std::task;
-use async_std::task::JoinHandle;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::fmt;
-use std::net::{IpAddr, Shutdown};
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -30,15 +28,20 @@ use zenoh_link_commons::{
 use zenoh_protocol::core::{EndPoint, Locator};
 use zenoh_result::{bail, zerror, Error as ZError, ZResult};
 use zenoh_sync::Signal;
+use tokio::io::{AsyncWriteExt, AsyncReadExt};
+use std::cell::UnsafeCell;
+use tokio::task::JoinHandle;
+
 
 use super::{
     get_tcp_addrs, TCP_ACCEPT_THROTTLE_TIME, TCP_DEFAULT_MTU, TCP_LINGER_TIMEOUT,
     TCP_LOCATOR_PREFIX,
 };
+use tokio::net::{TcpStream, TcpListener};
 
 pub struct LinkUnicastTcp {
     // The underlying socket as returned from the async-std library
-    socket: TcpStream,
+    socket: UnsafeCell<TcpStream>,
     // The source socket address of this link (address used on the local host)
     src_addr: SocketAddr,
     src_locator: Locator,
@@ -46,6 +49,8 @@ pub struct LinkUnicastTcp {
     dst_addr: SocketAddr,
     dst_locator: Locator,
 }
+
+unsafe impl Sync for LinkUnicastTcp {}
 
 impl LinkUnicastTcp {
     fn new(socket: TcpStream, src_addr: SocketAddr, dst_addr: SocketAddr) -> LinkUnicastTcp {
@@ -60,8 +65,7 @@ impl LinkUnicastTcp {
         }
 
         // Set the TCP linger option
-        if let Err(err) = zenoh_util::net::set_linger(
-            &socket,
+        if let Err(err) = socket.set_linger(
             Some(Duration::from_secs(
                 (*TCP_LINGER_TIMEOUT).try_into().unwrap(),
             )),
@@ -76,13 +80,18 @@ impl LinkUnicastTcp {
 
         // Build the Tcp object
         LinkUnicastTcp {
-            socket,
+            socket: UnsafeCell::new(socket),
             src_addr,
             src_locator: Locator::new(TCP_LOCATOR_PREFIX, src_addr.to_string(), "").unwrap(),
             dst_addr,
             dst_locator: Locator::new(TCP_LOCATOR_PREFIX, dst_addr.to_string(), "").unwrap(),
         }
     }
+    #[allow(clippy::mut_from_ref)]
+    fn get_mut_socket(&self) -> &mut TcpStream {
+        unsafe { &mut *self.socket.get() }
+    }
+
 }
 
 #[async_trait]
@@ -90,7 +99,7 @@ impl LinkUnicastTrait for LinkUnicastTcp {
     async fn close(&self) -> ZResult<()> {
         log::trace!("Closing TCP link: {}", self);
         // Close the underlying TCP socket
-        self.socket.shutdown(Shutdown::Both).map_err(|e| {
+        self.get_mut_socket().shutdown().await.map_err(|e| {
             let e = zerror!("TCP link shutdown {}: {:?}", self, e);
             log::trace!("{}", e);
             e.into()
@@ -98,7 +107,7 @@ impl LinkUnicastTrait for LinkUnicastTcp {
     }
 
     async fn write(&self, buffer: &[u8]) -> ZResult<usize> {
-        (&self.socket).write(buffer).await.map_err(|e| {
+        self.get_mut_socket().write(buffer).await.map_err(|e| {
             let e = zerror!("Write error on TCP link {}: {}", self, e);
             log::trace!("{}", e);
             e.into()
@@ -106,7 +115,7 @@ impl LinkUnicastTrait for LinkUnicastTcp {
     }
 
     async fn write_all(&self, buffer: &[u8]) -> ZResult<()> {
-        (&self.socket).write_all(buffer).await.map_err(|e| {
+        self.get_mut_socket().write_all(buffer).await.map_err(|e| {
             let e = zerror!("Write error on TCP link {}: {}", self, e);
             log::trace!("{}", e);
             e.into()
@@ -114,7 +123,7 @@ impl LinkUnicastTrait for LinkUnicastTcp {
     }
 
     async fn read(&self, buffer: &mut [u8]) -> ZResult<usize> {
-        (&self.socket).read(buffer).await.map_err(|e| {
+        self.get_mut_socket().read(buffer).await.map_err(|e| {
             let e = zerror!("Read error on TCP link {}: {}", self, e);
             log::trace!("{}", e);
             e.into()
@@ -122,11 +131,15 @@ impl LinkUnicastTrait for LinkUnicastTcp {
     }
 
     async fn read_exact(&self, buffer: &mut [u8]) -> ZResult<()> {
-        (&self.socket).read_exact(buffer).await.map_err(|e| {
-            let e = zerror!("Read error on TCP link {}: {}", self, e);
-            log::trace!("{}", e);
-            e.into()
-        })
+        let _ = self.get_mut_socket()
+            .read_exact(buffer)
+            .await
+            .map_err(|e| {
+                let e = zerror!("Read error on TCP link {}: {}", self, e);
+                log::trace!("{}", e);
+                e
+            });
+        Ok(())
     }
 
     #[inline(always)]
@@ -158,7 +171,9 @@ impl LinkUnicastTrait for LinkUnicastTcp {
 impl Drop for LinkUnicastTcp {
     fn drop(&mut self) {
         // Close the underlying TCP socket
-        let _ = self.socket.shutdown(Shutdown::Both);
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let _ = self.get_mut_socket().shutdown().await;
+        });
     }
 }
 
@@ -306,7 +321,7 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastTcp {
                     let c_manager = self.manager.clone();
                     let c_listeners = self.listeners.clone();
                     let c_addr = local_addr;
-                    let handle = task::spawn(async move {
+                    let handle = tokio::spawn(async move {
                         // Wait for the accept loop to terminate
                         let res = accept_task(socket, c_active, c_signal, c_manager).await;
                         zwrite!(c_listeners).remove(&c_addr);
@@ -362,7 +377,7 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastTcp {
                 // Send the stop signal
                 l.active.store(false, Ordering::Release);
                 l.signal.trigger();
-                l.handle.await
+                l.handle.await?
             }
             None => {
                 bail!(
@@ -455,7 +470,7 @@ async fn accept_task(
                 //       Linux systems this limit can be changed by using the "ulimit" command line
                 //       tool. In case of systemd-based systems, this can be changed by using the
                 //       "sysctl" command line tool.
-                task::sleep(Duration::from_micros(*TCP_ACCEPT_THROTTLE_TIME)).await;
+                tokio::time::sleep(Duration::from_micros(*TCP_ACCEPT_THROTTLE_TIME)).await;
                 continue;
             }
         };
