@@ -20,7 +20,7 @@ use crate::{
     },
     TransportConfigUnicast, TransportManager,
 };
-use async_std::sync::Mutex;
+use tokio::sync::Mutex;
 use async_trait::async_trait;
 use rand::Rng;
 use std::time::Duration;

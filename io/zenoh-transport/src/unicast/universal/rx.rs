@@ -15,7 +15,7 @@ use crate::transport_unicast_inner::TransportUnicastTrait;
 //
 use super::transport::TransportUnicastUniversal;
 use crate::common::priority::TransportChannelRx;
-use async_std::task;
+use tokio::task;
 use std::sync::MutexGuard;
 use zenoh_buffers::{
     reader::{HasReader, Reader},

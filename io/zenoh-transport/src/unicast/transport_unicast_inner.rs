@@ -14,7 +14,7 @@
 
 use std::{fmt::DebugStruct, sync::Arc, time::Duration};
 
-use async_std::sync::MutexGuard as AsyncMutexGuard;
+use tokio::sync::MutexGuard as AsyncMutexGuard;
 use async_trait::async_trait;
 use zenoh_link::{LinkUnicast, LinkUnicastDirection};
 use zenoh_protocol::{

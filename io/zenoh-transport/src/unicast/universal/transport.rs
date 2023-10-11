@@ -18,7 +18,7 @@ use crate::transport_unicast_inner::TransportUnicastTrait;
 use crate::unicast::universal::link::TransportLinkUnicast;
 use crate::TransportConfigUnicast;
 use crate::{TransportExecutor, TransportManager, TransportPeerEventHandler};
-use async_std::sync::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard};
+use tokio::sync::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard};
 use async_trait::async_trait;
 use std::fmt::DebugStruct;
 use std::sync::{Arc, RwLock};

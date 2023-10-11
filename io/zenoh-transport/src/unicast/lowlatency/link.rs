@@ -15,8 +15,8 @@ use super::transport::TransportUnicastLowlatency;
 #[cfg(feature = "stats")]
 use crate::stats::TransportStats;
 use crate::TransportExecutor;
-use async_std::task;
-use async_std::{prelude::FutureExt, sync::RwLock};
+use async_std::prelude::FutureExt;
+use tokio::{task, sync::RwLock};
 use zenoh_codec::*;
 use zenoh_core::{zasyncread, zasyncwrite};
 
@@ -167,7 +167,7 @@ impl TransportUnicastLowlatency {
         drop(guard);
 
         if let Some(handle) = handle {
-            let _ = handle.cancel().await;
+            let _ = handle.abort();
             log::debug!("[{}] rx task stopped...", zid,);
         }
     }

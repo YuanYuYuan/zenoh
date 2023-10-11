@@ -22,8 +22,8 @@ use crate::{TransportExecutor, TransportPeerEventHandler};
 use async_executor::Task;
 #[cfg(feature = "transport_unixpipe")]
 use async_std::sync::RwLockUpgradableReadGuard;
-use async_std::sync::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard, RwLock};
-use async_std::task::JoinHandle;
+use tokio::sync::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard, RwLock};
+use tokio::task::JoinHandle;
 use async_trait::async_trait;
 use std::sync::{Arc, RwLock as SyncRwLock};
 use std::time::Duration;

@@ -24,7 +24,8 @@ use crate::{
     universal::transport::TransportUnicastUniversal,
     TransportManager,
 };
-use async_std::{prelude::FutureExt, sync::Mutex, task};
+use async_std::prelude::FutureExt;
+use tokio::{sync::Mutex, task};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 #[cfg(feature = "shared-memory")]
 use zenoh_config::SharedMemoryConf;

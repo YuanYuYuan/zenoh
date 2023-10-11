@@ -21,8 +21,8 @@ use crate::common::priority::TransportPriorityTx;
 use crate::common::stats::TransportStats;
 use crate::TransportExecutor;
 use async_std::prelude::FutureExt;
-use async_std::task;
-use async_std::task::JoinHandle;
+use tokio::task;
+use tokio::task::JoinHandle;
 
 #[cfg(all(feature = "unstable", feature = "transport_compression"))]
 use std::convert::TryInto;
@@ -184,7 +184,7 @@ impl TransportLinkUnicast {
         if let Some(handle) = self.handle_rx.take() {
             // SAFETY: it is safe to unwrap the Arc since we have the ownership of the whole link
             let handle_rx = Arc::try_unwrap(handle).unwrap();
-            handle_rx.await;
+            handle_rx.await?;
         }
 
         self.stop_tx();
