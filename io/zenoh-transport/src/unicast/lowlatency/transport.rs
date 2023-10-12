@@ -19,7 +19,6 @@ use crate::transport_unicast_inner::TransportUnicastTrait;
 use crate::TransportConfigUnicast;
 use crate::TransportManager;
 use crate::{TransportExecutor, TransportPeerEventHandler};
-use async_executor::Task;
 #[cfg(feature = "transport_unixpipe")]
 use async_std::sync::RwLockUpgradableReadGuard;
 use tokio::sync::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard, RwLock};
@@ -64,7 +63,7 @@ pub(crate) struct TransportUnicastLowlatency {
     pub(super) stats: Arc<TransportStats>,
 
     // The flags to stop TX/RX tasks
-    pub(crate) handle_keepalive: Arc<RwLock<Option<Task<()>>>>,
+    pub(crate) handle_keepalive: Arc<RwLock<Option<JoinHandle<()>>>>,
     pub(crate) handle_rx: Arc<RwLock<Option<JoinHandle<()>>>>,
 }
 

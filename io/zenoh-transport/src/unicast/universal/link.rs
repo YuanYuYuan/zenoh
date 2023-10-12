@@ -66,7 +66,7 @@ pub(super) struct TransportLinkUnicast {
     // The transport this link is associated to
     transport: TransportUnicastUniversal,
     // The signals to stop TX/RX tasks
-    handle_tx: Option<Arc<async_executor::Task<()>>>,
+    handle_tx: Option<Arc<tokio::task::JoinHandle<()>>>,
     signal_rx: Signal,
     handle_rx: Option<Arc<JoinHandle<()>>>,
 }
@@ -115,7 +115,7 @@ impl TransportLinkUnicast {
             // Spawn the TX task
             let c_link = self.link.clone();
             let c_transport = self.transport.clone();
-            let handle = executor.spawn(async move {
+            let handle = executor.runtime.spawn(async move {
                 let res = tx_task(
                     consumer,
                     c_link.clone(),
@@ -191,7 +191,7 @@ impl TransportLinkUnicast {
         if let Some(handle) = self.handle_tx.take() {
             // SAFETY: it is safe to unwrap the Arc since we have the ownership of the whole link
             let handle_tx = Arc::try_unwrap(handle).unwrap();
-            handle_tx.await;
+            handle_tx.await?;
         }
 
         self.link.close().await
