@@ -20,9 +20,9 @@ use crate::common::priority::TransportPriorityTx;
 #[cfg(feature = "stats")]
 use crate::common::stats::TransportStats;
 use crate::TransportExecutor;
-use async_std::prelude::FutureExt;
 use tokio::task;
 use tokio::task::JoinHandle;
+use tokio::time::timeout;
 
 #[cfg(all(feature = "unstable", feature = "transport_compression"))]
 use std::convert::TryInto;
@@ -213,7 +213,7 @@ async fn tx_task(
         vec![0; lz4_flex::block::get_maximum_output_size(MAX_BATCH_SIZE)].into_boxed_slice();
 
     loop {
-        match pipeline.pull().timeout(keep_alive).await {
+        match timeout(keep_alive, pipeline.pull()).await {
             Ok(res) => match res {
                 Some((batch, priority)) => {
                     // Send the buffer on the link
@@ -261,8 +261,7 @@ async fn tx_task(
     // Drain the transmission pipeline and write remaining bytes on the wire
     let mut batches = pipeline.drain();
     for (b, _) in batches.drain(..) {
-        link.write_all(b.as_bytes())
-            .timeout(keep_alive)
+        timeout(keep_alive, link.write_all(b.as_bytes()))
             .await
             .map_err(|_| zerror!("{}: flush failed after {} ms", link, keep_alive.as_millis()))??;
 
@@ -284,23 +283,13 @@ async fn rx_task_stream(
     rx_batch_size: BatchSize,
     rx_buffer_size: usize,
 ) -> ZResult<()> {
-    enum Action {
-        Read(usize),
-        Stop,
-    }
-
-    async fn read(link: &LinkUnicast, buffer: &mut [u8]) -> ZResult<Action> {
+    async fn read(link: &LinkUnicast, buffer: &mut [u8]) -> ZResult<usize> {
         // 16 bits for reading the batch length
         let mut length = [0_u8, 0_u8];
         link.read_exact(&mut length).await?;
         let n = BatchSize::from_le_bytes(length) as usize;
         link.read_exact(&mut buffer[0..n]).await?;
-        Ok(Action::Read(n))
-    }
-
-    async fn stop(signal: Signal) -> ZResult<Action> {
-        signal.wait().await;
-        Ok(Action::Stop)
+        Ok(n)
     }
 
     // The pool of buffers
@@ -311,17 +300,16 @@ async fn rx_task_stream(
     }
 
     let pool = RecyclingObjectPool::new(n, || vec![0_u8; mtu].into_boxed_slice());
-    while !signal.is_triggered() {
+
+    loop {
         // Retrieve one buffer
         let mut buffer = pool.try_take().unwrap_or_else(|| pool.alloc());
         // Async read from the underlying link
-        let action = read(&link, &mut buffer)
-            .race(stop(signal.clone()))
-            .timeout(lease)
-            .await
-            .map_err(|_| zerror!("{}: expired after {} milliseconds", link, lease.as_millis()))??;
-        match action {
-            Action::Read(n) => {
+        tokio::select! {
+            _ = signal.wait() => break,
+            res = timeout(lease, read(&link, &mut buffer)) => {
+                let n = res.map_err(|_| zerror!("{}: expired after {} milliseconds", link, lease.as_millis()))??;
+
                 #[cfg(feature = "stats")]
                 {
                     transport.stats.inc_rx_bytes(2 + n); // Account for the batch len encoding (16 bits)
@@ -341,7 +329,6 @@ async fn rx_task_stream(
                     .map_err(|_| zerror!("Read {} bytes but buffer is {} bytes", n, mtu))?;
                 transport.read_messages(zslice, &link)?;
             }
-            Action::Stop => break,
         }
     }
     Ok(())
@@ -355,19 +342,9 @@ async fn rx_task_dgram(
     rx_batch_size: BatchSize,
     rx_buffer_size: usize,
 ) -> ZResult<()> {
-    enum Action {
-        Read(usize),
-        Stop,
-    }
-
-    async fn read(link: &LinkUnicast, buffer: &mut [u8]) -> ZResult<Action> {
+    async fn read(link: &LinkUnicast, buffer: &mut [u8]) -> ZResult<usize> {
         let n = link.read(buffer).await?;
-        Ok(Action::Read(n))
-    }
-
-    async fn stop(signal: Signal) -> ZResult<Action> {
-        signal.wait().await;
-        Ok(Action::Stop)
+        Ok(n)
     }
 
     // The pool of buffers
@@ -378,17 +355,15 @@ async fn rx_task_dgram(
     }
     let pool = RecyclingObjectPool::new(n, || vec![0_u8; mtu].into_boxed_slice());
 
-    while !signal.is_triggered() {
+    loop {
         // Retrieve one buffer
         let mut buffer = pool.try_take().unwrap_or_else(|| pool.alloc());
+
         // Async read from the underlying link
-        let action = read(&link, &mut buffer)
-            .race(stop(signal.clone()))
-            .timeout(lease)
-            .await
-            .map_err(|_| zerror!("{}: expired after {} milliseconds", link, lease.as_millis()))??;
-        match action {
-            Action::Read(n) => {
+        tokio::select! {
+            _ = signal.wait() => break,
+            res = timeout(lease, read(&link, &mut buffer)) => {
+                let n = res.map_err(|_| zerror!("{}: expired after {} milliseconds", link, lease.as_millis()))??;
                 if n == 0 {
                     // Reading 0 bytes means error
                     bail!("{}: zero bytes reading", link)
@@ -413,7 +388,6 @@ async fn rx_task_dgram(
                     .map_err(|_| zerror!("Read {} bytes but buffer is {} bytes", n, mtu))?;
                 transport.read_messages(zslice, &link)?;
             }
-            Action::Stop => break,
         }
     }
     Ok(())

@@ -20,8 +20,8 @@ use crate::common::pipeline::{
 #[cfg(feature = "stats")]
 use crate::stats::TransportStats;
 use async_std::prelude::FutureExt;
-use async_std::task;
-use async_std::task::JoinHandle;
+use tokio::task;
+use tokio::task::JoinHandle;
 use std::convert::TryInto;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -184,14 +184,14 @@ impl TransportLinkMulticast {
         if let Some(handle) = self.handle_rx.take() {
             // It is safe to unwrap the Arc since we have the ownership of the whole link
             let handle_rx = Arc::try_unwrap(handle).unwrap();
-            handle_rx.await;
+            handle_rx.await?;
         }
 
         self.stop_tx();
         if let Some(handle) = self.handle_tx.take() {
             // It is safe to unwrap the Arc since we have the ownership of the whole link
             let handle_tx = Arc::try_unwrap(handle).unwrap();
-            handle_tx.await;
+            handle_tx.await?;
         }
 
         self.link.close().await
@@ -226,7 +226,7 @@ async fn tx_task(
         let target = last_join + join_interval;
         if now < target {
             let left = target - now;
-            task::sleep(left).await;
+            tokio::time::sleep(left).await;
         }
         Action::Join
     }

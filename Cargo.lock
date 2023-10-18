@@ -4492,6 +4492,7 @@ dependencies = [
  "serde_json",
  "socket2 0.5.4",
  "stop-token",
+ "tokio",
  "uhlc",
  "uuid",
  "vec_map",
@@ -4561,8 +4562,10 @@ dependencies = [
 name = "zenoh-core"
 version = "0.10.0-dev"
 dependencies = [
+ "async-global-executor",
  "async-std",
  "lazy_static",
+ "tokio",
  "zenoh-result",
 ]
 
@@ -4592,6 +4595,7 @@ dependencies = [
  "log",
  "rand 0.8.5",
  "rustc_version 0.4.0",
+ "tokio",
  "zenoh",
  "zenoh-ext",
 ]

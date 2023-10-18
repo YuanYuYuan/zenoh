@@ -13,7 +13,6 @@
 //
 use super::batch::{Encode, WBatch, WError};
 use super::priority::{TransportChannelTx, TransportPriorityTx};
-use async_std::prelude::FutureExt;
 use flume::{bounded, Receiver, Sender};
 use ringbuffer_spsc::{RingBuffer, RingBufferReader, RingBufferWriter};
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
@@ -663,11 +662,9 @@ impl TransmissionPipelineConsumer {
             }
 
             // Wait for the backoff to expire or for a new message
-            let _ = self
-                .n_out_r
-                .recv_async()
-                .timeout(Duration::from_nanos(bo as u64))
-                .await;
+            let _ =
+                tokio::time::timeout(Duration::from_nanos(bo as u64), self.n_out_r.recv_async())
+                    .await;
         }
         None
     }

@@ -19,7 +19,7 @@ pub use super::resource::*;
 use super::runtime::Runtime;
 use crate::net::codec::Zenoh080Routing;
 use crate::net::protocol::linkstate::LinkStateList;
-use async_std::task::JoinHandle;
+use tokio::task::JoinHandle;
 use std::any::Any;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
@@ -348,8 +348,8 @@ impl Tables {
         if (net_type == WhatAmI::Router && self.routers_trees_task.is_none())
             || (net_type == WhatAmI::Peer && self.peers_trees_task.is_none())
         {
-            let task = Some(async_std::task::spawn(async move {
-                async_std::task::sleep(std::time::Duration::from_millis(*TREES_COMPUTATION_DELAY))
+            let task = Some(tokio::task::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(*TREES_COMPUTATION_DELAY))
                     .await;
                 let mut tables = zwrite!(tables_ref.tables);
 

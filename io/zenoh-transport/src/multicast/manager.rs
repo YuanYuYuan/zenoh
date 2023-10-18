@@ -157,7 +157,7 @@ impl Default for TransportManagerBuilderMulticast {
             #[cfg(feature = "shared-memory")]
             is_shm: *shm.enabled(),
         };
-        async_std::task::block_on(tmb.from_config(&Config::default())).unwrap()
+        async_global_executor::block_on(tmb.from_config(&Config::default())).unwrap()
     }
 }
 
