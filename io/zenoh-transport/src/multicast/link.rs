@@ -20,11 +20,11 @@ use crate::common::pipeline::{
 #[cfg(feature = "stats")]
 use crate::stats::TransportStats;
 use async_std::prelude::FutureExt;
-use tokio::task;
-use tokio::task::JoinHandle;
 use std::convert::TryInto;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::task;
+use tokio::task::JoinHandle;
 use zenoh_buffers::ZSlice;
 use zenoh_core::zlock;
 use zenoh_link::{LinkMulticast, Locator};

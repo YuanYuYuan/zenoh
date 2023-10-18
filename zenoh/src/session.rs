@@ -37,7 +37,6 @@ use crate::Sample;
 use crate::SampleKind;
 use crate::Selector;
 use crate::Value;
-use tokio::task;
 use log::{error, trace, warn};
 use std::collections::HashMap;
 use std::convert::TryFrom;
@@ -48,6 +47,7 @@ use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Duration;
+use tokio::task;
 use uhlc::HLC;
 use zenoh_buffers::ZBuf;
 use zenoh_collections::SingleOrVec;
@@ -846,7 +846,8 @@ impl Session {
                     match runtime.start().await {
                         Ok(()) => {
                             // Workaround for the declare_and_shoot problem
-                            tokio::time::sleep(Duration::from_millis(*API_OPEN_SESSION_DELAY)).await;
+                            tokio::time::sleep(Duration::from_millis(*API_OPEN_SESSION_DELAY))
+                                .await;
                             Ok(session)
                         }
                         Err(err) => Err(err),
