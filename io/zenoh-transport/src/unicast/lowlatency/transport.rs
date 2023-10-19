@@ -162,7 +162,7 @@ impl TransportUnicastTrait for TransportUnicastLowlatency {
     }
 
     fn get_links(&self) -> Vec<LinkUnicast> {
-        let guard = async_std::task::block_on(async { zasyncread!(self.link) });
+        let guard = tokio::runtime::Handle::current().block_on(async { zasyncread!(self.link) });
         [guard.clone()].to_vec()
     }
 
