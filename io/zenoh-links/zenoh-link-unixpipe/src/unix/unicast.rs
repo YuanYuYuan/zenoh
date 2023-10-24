@@ -15,8 +15,8 @@ use crate::config;
 #[cfg(not(target_os = "macos"))]
 use advisory_lock::{AdvisoryFileLock, FileLockMode};
 use async_io::Async;
-use async_std::fs::remove_file;
-use async_std::task::JoinHandle;
+use tokio::fs::remove_file;
+use tokio::task::JoinHandle;
 use async_trait::async_trait;
 use filepath::FilePath;
 use nix::unistd::unlink;
@@ -29,6 +29,7 @@ use std::io::{Read, Write};
 use std::sync::Arc;
 use zenoh_core::{zasyncread, zasyncwrite};
 use zenoh_protocol::core::{EndPoint, Locator};
+use std::io::ErrorKind;
 
 use unix_named_pipe::{create, open_read, open_write};
 
@@ -111,7 +112,7 @@ impl PipeR {
         let result = self
             .pipe
             .read_with_mut(|pipe| match pipe.read(&mut buf[..]) {
-                Ok(0) => Err(async_std::io::ErrorKind::WouldBlock.into()),
+                Ok(0) => Err(ErrorKind::WouldBlock.into()),
                 Ok(val) => Ok(val),
                 Err(e) => Err(e),
             })
@@ -123,13 +124,13 @@ impl PipeR {
         let mut r: usize = 0;
         self.pipe
             .read_with_mut(|pipe| match pipe.read(&mut buf[r..]) {
-                Ok(0) => Err(async_std::io::ErrorKind::WouldBlock.into()),
+                Ok(0) => Err(ErrorKind::WouldBlock.into()),
                 Ok(val) => {
                     r += val;
                     if r == buf.len() {
                         return Ok(());
                     }
-                    Err(async_std::io::ErrorKind::WouldBlock.into())
+                    Err(ErrorKind::WouldBlock.into())
                 }
                 Err(e) => Err(e),
             })
@@ -184,7 +185,7 @@ impl PipeW {
         let result = self
             .pipe
             .write_with_mut(|pipe| match pipe.write(buf) {
-                Ok(0) => Err(async_std::io::ErrorKind::WouldBlock.into()),
+                Ok(0) => Err(ErrorKind::WouldBlock.into()),
                 Ok(val) => Ok(val),
                 Err(e) => Err(e),
             })
@@ -196,13 +197,13 @@ impl PipeW {
         let mut r: usize = 0;
         self.pipe
             .write_with_mut(|pipe| match pipe.write(&buf[r..]) {
-                Ok(0) => Err(async_std::io::ErrorKind::WouldBlock.into()),
+                Ok(0) => Err(ErrorKind::WouldBlock.into()),
                 Ok(val) => {
                     r += val;
                     if r == buf.len() {
                         return Ok(());
                     }
-                    Err(async_std::io::ErrorKind::WouldBlock.into())
+                    Err(ErrorKind::WouldBlock.into())
                 }
                 Err(e) => Err(e),
             })
@@ -289,7 +290,7 @@ impl UnicastPipeListener {
         let mut request_channel = PipeR::new(&path_uplink, access_mode).await?;
 
         // create listening task
-        let listening_task_handle = async_std::task::spawn(async move {
+        let listening_task_handle = tokio::task::spawn(async move {
             loop {
                 let _ = handle_incoming_connections(
                     &endpoint,
@@ -309,8 +310,8 @@ impl UnicastPipeListener {
         })
     }
 
-    async fn stop_listening(self) {
-        self.listening_task_handle.cancel().await;
+    fn stop_listening(self) {
+        self.listening_task_handle.abort();
     }
 }
 
@@ -549,7 +550,7 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastPipe {
         let removed = zasyncwrite!(self.listeners).remove(endpoint);
         match removed {
             Some(val) => {
-                val.stop_listening().await;
+                val.stop_listening();
                 Ok(())
             }
             None => bail!("No listener found for endpoint {}", endpoint),
@@ -557,14 +558,14 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastPipe {
     }
 
     fn get_listeners(&self) -> Vec<EndPoint> {
-        async_std::task::block_on(async { zasyncread!(self.listeners) })
+        tokio::runtime::Handle::current().block_on(async { zasyncread!(self.listeners) })
             .keys()
             .cloned()
             .collect()
     }
 
     fn get_locators(&self) -> Vec<Locator> {
-        async_std::task::block_on(async { zasyncread!(self.listeners) })
+        tokio::runtime::Handle::current().block_on(async { zasyncread!(self.listeners) })
             .values()
             .map(|v| v.uplink_locator.clone())
             .collect()

@@ -13,18 +13,16 @@
 //
 use super::common::{pipeline::TransmissionPipeline, priority::TransportPriorityTx};
 use super::transport::TransportMulticastInner;
-use crate::common::batch::WBatch;
 use crate::common::pipeline::{
     TransmissionPipelineConf, TransmissionPipelineConsumer, TransmissionPipelineProducer,
 };
 #[cfg(feature = "stats")]
 use crate::stats::TransportStats;
-use async_std::prelude::FutureExt;
 use std::convert::TryInto;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::task;
 use tokio::task::JoinHandle;
+use tokio::{select, task};
 use zenoh_buffers::ZSlice;
 use zenoh_core::zlock;
 use zenoh_link::{LinkMulticast, Locator};
@@ -208,55 +206,68 @@ async fn tx_task(
     mut last_sns: Vec<PrioritySn>,
     #[cfg(feature = "stats")] stats: Arc<TransportStats>,
 ) -> ZResult<()> {
-    enum Action {
-        Pull((WBatch, usize)),
-        Join,
-        Stop,
-    }
 
-    async fn pull(pipeline: &mut TransmissionPipelineConsumer) -> Action {
-        match pipeline.pull().await {
-            Some(sb) => Action::Pull(sb),
-            None => Action::Stop,
-        }
-    }
-
-    async fn join(last_join: Instant, join_interval: Duration) -> Action {
+    async fn join(last_join: Instant, join_interval: Duration) {
         let now = Instant::now();
         let target = last_join + join_interval;
         if now < target {
             let left = target - now;
             tokio::time::sleep(left).await;
         }
-        Action::Join
     }
 
     let mut last_join = Instant::now().checked_sub(config.join_interval).unwrap();
     loop {
-        match pull(&mut pipeline)
-            .race(join(last_join, config.join_interval))
-            .await
-        {
-            Action::Pull((batch, priority)) => {
-                // Send the buffer on the link
-                let bytes = batch.as_bytes();
-                link.write_all(bytes).await?;
-                // Keep track of next SNs
-                if let Some(sn) = batch.latest_sn.reliable {
-                    last_sns[priority].reliable = sn;
+        select! {
+            res = pipeline.pull() => {
+                match res {
+                    Some((batch, priority)) => {
+                        // Send the buffer on the link
+                        let bytes = batch.as_bytes();
+                        link.write_all(bytes).await?;
+                        // Keep track of next SNs
+                        if let Some(sn) = batch.latest_sn.reliable {
+                            last_sns[priority].reliable = sn;
+                        }
+                        if let Some(sn) = batch.latest_sn.best_effort {
+                            last_sns[priority].best_effort = sn;
+                        }
+                        #[cfg(feature = "stats")]
+                        {
+                            stats.inc_tx_t_msgs(batch.stats.t_msgs);
+                            stats.inc_tx_bytes(bytes.len());
+                        }
+                        // Reinsert the batch into the queue
+                        pipeline.refill(batch, priority);
+
+                    }
+                    None => {
+                        // Drain the transmission pipeline and write remaining bytes on the wire
+                        let mut batches = pipeline.drain();
+                        for (b, _) in batches.drain(..) {
+                            tokio::time::timeout(config.join_interval, link.write_all(b.as_bytes()))
+                                .await
+                                .map_err(|_| {
+                                    zerror!(
+                                        "{}: flush failed after {} ms",
+                                        link,
+                                        config.join_interval.as_millis()
+                                    )
+                                })??;
+
+                            #[cfg(feature = "stats")]
+                            {
+                                stats.inc_tx_t_msgs(b.stats.t_msgs);
+                                stats.inc_tx_bytes(b.len() as usize);
+                            }
+                        }
+                        break;
+                    }
+
                 }
-                if let Some(sn) = batch.latest_sn.best_effort {
-                    last_sns[priority].best_effort = sn;
-                }
-                #[cfg(feature = "stats")]
-                {
-                    stats.inc_tx_t_msgs(batch.stats.t_msgs);
-                    stats.inc_tx_bytes(bytes.len());
-                }
-                // Reinsert the batch into the queue
-                pipeline.refill(batch, priority);
             }
-            Action::Join => {
+
+            _ = join(last_join, config.join_interval) => {
                 let next_sns = last_sns
                     .iter()
                     .map(|c| PrioritySn {
@@ -293,29 +304,7 @@ async fn tx_task(
                 }
 
                 last_join = Instant::now();
-            }
-            Action::Stop => {
-                // Drain the transmission pipeline and write remaining bytes on the wire
-                let mut batches = pipeline.drain();
-                for (b, _) in batches.drain(..) {
-                    link.write_all(b.as_bytes())
-                        .timeout(config.join_interval)
-                        .await
-                        .map_err(|_| {
-                            zerror!(
-                                "{}: flush failed after {} ms",
-                                link,
-                                config.join_interval.as_millis()
-                            )
-                        })??;
 
-                    #[cfg(feature = "stats")]
-                    {
-                        stats.inc_tx_t_msgs(b.stats.t_msgs);
-                        stats.inc_tx_bytes(b.len() as usize);
-                    }
-                }
-                break;
             }
         }
     }
@@ -330,19 +319,9 @@ async fn rx_task(
     rx_buffer_size: usize,
     batch_size: BatchSize,
 ) -> ZResult<()> {
-    enum Action {
-        Read((usize, Locator)),
-        Stop,
-    }
-
-    async fn read(link: &LinkMulticast, buffer: &mut [u8]) -> ZResult<Action> {
+    async fn read(link: &LinkMulticast, buffer: &mut [u8]) -> ZResult<(usize, Locator)> {
         let (n, loc) = link.read(buffer).await?;
-        Ok(Action::Read((n, loc.into_owned())))
-    }
-
-    async fn stop(signal: Signal) -> ZResult<Action> {
-        signal.wait().await;
-        Ok(Action::Stop)
+        Ok((n, loc.into_owned()))
     }
 
     // The pool of buffers
@@ -352,13 +331,15 @@ async fn rx_task(
         n += 1;
     }
     let pool = RecyclingObjectPool::new(n, || vec![0_u8; mtu].into_boxed_slice());
-    while !signal.is_triggered() {
+
+    loop {
         // Retrieve one buffer
         let mut buffer = pool.try_take().unwrap_or_else(|| pool.alloc());
-        // Async read from the underlying link
-        let action = read(&link, &mut buffer).race(stop(signal.clone())).await?;
-        match action {
-            Action::Read((n, loc)) => {
+
+        select! {
+            _ = signal.wait() => break,
+            res = read(&link, &mut buffer) => {
+                let (n, loc) = res?;
                 if n == 0 {
                     // Reading 0 bytes means error
                     bail!("{}: zero bytes reading", link);
@@ -379,7 +360,6 @@ async fn rx_task(
                     &transport,
                 )?;
             }
-            Action::Stop => break,
         }
     }
     Ok(())
