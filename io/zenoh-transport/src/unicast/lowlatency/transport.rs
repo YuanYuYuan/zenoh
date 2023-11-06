@@ -19,15 +19,11 @@ use crate::transport_unicast_inner::TransportUnicastTrait;
 use crate::TransportConfigUnicast;
 use crate::TransportManager;
 use crate::{TransportExecutor, TransportPeerEventHandler};
-#[cfg(feature = "transport_unixpipe")]
-use async_std::sync::RwLockUpgradableReadGuard;
 use async_trait::async_trait;
 use std::sync::{Arc, RwLock as SyncRwLock};
 use std::time::Duration;
 use tokio::sync::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard, RwLock};
 use tokio::task::JoinHandle;
-#[cfg(feature = "transport_unixpipe")]
-use zenoh_core::zasyncread_upgradable;
 use zenoh_core::{zasynclock, zasyncread, zread, zwrite};
 #[cfg(feature = "transport_unixpipe")]
 use zenoh_link::unixpipe::UNIXPIPE_LOCATOR_PREFIX;
@@ -234,7 +230,13 @@ impl TransportUnicastTrait for TransportUnicastLowlatency {
 
         #[cfg(feature = "transport_unixpipe")]
         {
-            let guard = zasyncread_upgradable!(self.link);
+            // For performance reasons, it first performs a try_write() and,
+            // if it fails, it falls back on write().await
+            let guard = if let Ok(g) = self.link.try_read() {
+                g
+            } else {
+                self.link.read().await
+            };
 
             let existing_unixpipe = guard.get_dst().protocol().as_str() == UNIXPIPE_LOCATOR_PREFIX;
             let new_unixpipe = link.get_dst().protocol().as_str() == UNIXPIPE_LOCATOR_PREFIX;
@@ -270,7 +272,7 @@ impl TransportUnicastTrait for TransportUnicastLowlatency {
                     }
 
                     // Set the new link
-                    let mut write_guard = RwLockUpgradableReadGuard::upgrade(guard).await;
+                    let mut write_guard = self.link.write().await;
                     *write_guard = link;
 
                     Ok(())
