@@ -4777,6 +4777,7 @@ name = "zenoh-link-unixpipe"
 version = "0.10.0-dev"
 dependencies = [
  "advisory-lock",
+ "async-global-executor",
  "async-io",
  "async-std",
  "async-trait",
