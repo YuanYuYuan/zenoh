@@ -17,7 +17,7 @@ use crate::stats::TransportStats;
 use crate::transport_unicast_inner::TransportUnicastTrait;
 use crate::unicast::universal::link::TransportLinkUnicast;
 use crate::TransportConfigUnicast;
-use crate::{TransportExecutor, TransportManager, TransportPeerEventHandler};
+use crate::{TransportManager, TransportPeerEventHandler};
 use async_trait::async_trait;
 use std::fmt::DebugStruct;
 use std::sync::{Arc, RwLock};
@@ -420,7 +420,6 @@ impl TransportUnicastTrait for TransportUnicastUniversal {
     fn start_tx(
         &self,
         link: &LinkUnicast,
-        executor: &TransportExecutor,
         keep_alive: Duration,
         batch_size: u16,
     ) -> ZResult<()> {
@@ -428,7 +427,7 @@ impl TransportUnicastTrait for TransportUnicastUniversal {
         match zlinkgetmut!(guard, link) {
             Some(l) => {
                 assert!(!self.priority_tx.is_empty());
-                l.start_tx(executor, keep_alive, batch_size, &self.priority_tx);
+                l.start_tx(keep_alive, batch_size, &self.priority_tx);
                 Ok(())
             }
             None => {

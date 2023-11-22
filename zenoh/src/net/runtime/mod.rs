@@ -32,9 +32,8 @@ use futures::Future;
 use std::any::Any;
 use std::sync::Arc;
 use std::time::Duration;
-use stop_token::future::FutureExt;
-use stop_token::{StopSource, TimedOutError};
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use uhlc::{HLCBuilder, HLC};
 use zenoh_link::{EndPoint, Link};
 use zenoh_protocol::core::{whatami::WhatAmIMatcher, Locator, WhatAmI, ZenohId};
@@ -56,7 +55,7 @@ pub struct RuntimeState {
     pub transport_handlers: std::sync::RwLock<Vec<Arc<dyn TransportEventHandler>>>,
     pub(crate) locators: std::sync::RwLock<Vec<Locator>>,
     pub hlc: Option<Arc<HLC>>,
-    pub(crate) stop_source: std::sync::RwLock<Option<StopSource>>,
+    pub(crate) cancel_token: CancellationToken,
 }
 
 #[derive(Clone)]
@@ -85,7 +84,7 @@ impl Runtime {
         log::debug!("Zenoh Rust API {}", GIT_VERSION);
         // Make sure to have have enough threads spawned in the async futures executor
         // WARN: switch to tokio
-        zasync_executor_init!();
+        // zasync_executor_init!();
 
         let zid = *config.id();
 
@@ -147,7 +146,7 @@ impl Runtime {
                 transport_handlers: std::sync::RwLock::new(vec![]),
                 locators: std::sync::RwLock::new(vec![]),
                 hlc,
-                stop_source: std::sync::RwLock::new(Some(StopSource::new())),
+                cancel_token: CancellationToken::new(),
             }),
         };
         *handler.runtime.write().unwrap() = Some(runtime.clone());
@@ -190,7 +189,7 @@ impl Runtime {
 
     pub async fn close(&self) -> ZResult<()> {
         log::trace!("Runtime::close())");
-        drop(self.stop_source.write().unwrap().take());
+        self.cancel_token.cancel();
         self.manager().close().await;
         Ok(())
     }
@@ -203,16 +202,19 @@ impl Runtime {
         self.locators.read().unwrap().clone()
     }
 
-    pub(crate) fn spawn<F, T>(&self, future: F) -> Option<JoinHandle<Result<T, TimedOutError>>>
+    pub(crate) fn spawn<F, T>(&self, future: F) -> JoinHandle<()>
     where
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        self.stop_source
-            .read()
-            .unwrap()
-            .as_ref()
-            .map(|source| tokio::task::spawn(future.timeout_at(source.token())))
+        let handle = zenoh_runtime::ZRuntime::Net.handle();
+        let child_token = self.cancel_token.child_token();
+        handle.spawn(async move {
+            tokio::select! {
+                _ = child_token.cancelled() => { }
+                _ = future => { }
+            }
+        })
     }
 }
 

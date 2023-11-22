@@ -30,6 +30,7 @@ use zenoh_link_commons::{
 use zenoh_protocol::core::{EndPoint, Locator};
 use zenoh_result::{bail, zerror, Error as ZError, ZResult};
 use zenoh_sync::Signal;
+use zenoh_runtime::ZRuntime;
 
 use super::{
     get_tcp_addrs, TCP_ACCEPT_THROTTLE_TIME, TCP_DEFAULT_MTU, TCP_LINGER_TIMEOUT,
@@ -163,7 +164,7 @@ impl LinkUnicastTrait for LinkUnicastTcp {
 impl Drop for LinkUnicastTcp {
     fn drop(&mut self) {
         // Close the underlying TCP socket
-        async_global_executor::block_on(async {
+        ZRuntime::TX.handle().block_on(async {
             let _ = self.get_mut_socket().shutdown().await;
         });
     }

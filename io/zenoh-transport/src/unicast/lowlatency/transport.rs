@@ -18,7 +18,7 @@ use crate::stats::TransportStats;
 use crate::transport_unicast_inner::TransportUnicastTrait;
 use crate::TransportConfigUnicast;
 use crate::TransportManager;
-use crate::{TransportExecutor, TransportPeerEventHandler};
+use crate::TransportPeerEventHandler;
 use async_trait::async_trait;
 use std::sync::{Arc, RwLock as SyncRwLock};
 use std::time::Duration;
@@ -158,7 +158,9 @@ impl TransportUnicastTrait for TransportUnicastLowlatency {
     }
 
     fn get_links(&self) -> Vec<LinkUnicast> {
-        let guard = tokio::runtime::Handle::current().block_on(async { zasyncread!(self.link) });
+        let guard = zenoh_runtime::ZRuntime::Accept
+            .handle()
+            .block_on(async { zasyncread!(self.link) });
         [guard.clone()].to_vec()
     }
 
@@ -199,14 +201,8 @@ impl TransportUnicastTrait for TransportUnicastLowlatency {
         self.internal_schedule(msg)
     }
 
-    fn start_tx(
-        &self,
-        _link: &LinkUnicast,
-        executor: &TransportExecutor,
-        keep_alive: Duration,
-        _batch_size: u16,
-    ) -> ZResult<()> {
-        self.start_keepalive(executor, keep_alive);
+    fn start_tx(&self, _link: &LinkUnicast, keep_alive: Duration, _batch_size: u16) -> ZResult<()> {
+        self.start_keepalive(keep_alive);
         Ok(())
     }
 

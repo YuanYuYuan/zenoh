@@ -150,7 +150,6 @@ pub(super) async fn finalize_transport(
     let keep_alive = manager.config.unicast.lease / manager.config.unicast.keep_alive as u32;
     transport.start_tx(
         link,
-        &manager.tx_executor,
         keep_alive,
         input.agreed_batch_size,
     )?;

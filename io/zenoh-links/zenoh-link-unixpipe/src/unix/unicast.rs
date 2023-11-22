@@ -32,6 +32,7 @@ use std::sync::Arc;
 use tokio::io::Interest;
 use zenoh_core::{zasyncread, zasyncwrite};
 use zenoh_protocol::core::{EndPoint, Locator};
+use zenoh_runtime::ZRuntime;
 
 use unix_named_pipe::{create, open_read, open_write};
 
@@ -293,7 +294,7 @@ impl UnicastPipeListener {
 
         // create listening task
         let listening_task_handle = tokio::task::spawn_blocking(move || {
-            async_global_executor::block_on(async move {
+            ZRuntime::Accept.handle().block_on(async move {
                 loop {
                     let _ = handle_incoming_connections(
                         &endpoint,
@@ -562,14 +563,18 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastPipe {
     }
 
     fn get_listeners(&self) -> Vec<EndPoint> {
-        async_global_executor::block_on(async { zasyncread!(self.listeners) })
+        ZRuntime::Accept
+            .handle()
+            .block_on(async { zasyncread!(self.listeners) })
             .keys()
             .cloned()
             .collect()
     }
 
     fn get_locators(&self) -> Vec<Locator> {
-        async_global_executor::block_on(async { zasyncread!(self.listeners) })
+        ZRuntime::Accept
+            .handle()
+            .block_on(async { zasyncread!(self.listeners) })
             .values()
             .map(|v| v.uplink_locator.clone())
             .collect()
