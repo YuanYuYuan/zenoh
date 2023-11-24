@@ -129,7 +129,7 @@ impl TransportLinkUnicast {
                     log::debug!("{}", e);
                     // Spawn a task to avoid a deadlock waiting for this same task
                     // to finish in the close() joining its handle
-                    task::spawn(async move { c_transport.del_link(&c_link).await });
+                    zenoh_runtime::ZRuntime::Net.handle().spawn(async move { c_transport.del_link(&c_link).await });
                 }
             });
             self.handle_tx = Some(Arc::new(handle));
@@ -150,7 +150,7 @@ impl TransportLinkUnicast {
             let c_signal = self.signal_rx.clone();
             let c_rx_buffer_size = self.transport.manager.config.link_rx_buffer_size;
 
-            let handle = task::spawn(async move {
+            let handle = zenoh_runtime::ZRuntime::RX.handle().spawn(async move {
                 // Start the consume task
                 let res = rx_task(
                     c_link.clone(),
@@ -166,7 +166,7 @@ impl TransportLinkUnicast {
                     log::debug!("{}", e);
                     // Spawn a task to avoid a deadlock waiting for this same task
                     // to finish in the close() joining its handle
-                    task::spawn(async move { c_transport.del_link(&c_link).await });
+                    zenoh_runtime::ZRuntime::Net.handle().spawn(async move { c_transport.del_link(&c_link).await });
                 }
             });
             self.handle_rx = Some(Arc::new(handle));

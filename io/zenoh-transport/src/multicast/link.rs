@@ -115,7 +115,7 @@ impl TransportLinkMulticast {
             // Spawn the TX task
             let c_link = self.link.clone();
             let ctransport = self.transport.clone();
-            let handle = task::spawn(async move {
+            let handle = zenoh_runtime::ZRuntime::TX.handle().spawn(async move {
                 let res = tx_task(
                     consumer,
                     c_link.clone(),
@@ -129,7 +129,7 @@ impl TransportLinkMulticast {
                     log::debug!("{}", e);
                     // Spawn a task to avoid a deadlock waiting for this same task
                     // to finish in the close() joining its handle
-                    task::spawn(async move { ctransport.delete().await });
+                    zenoh_runtime::ZRuntime::Net.handle().spawn(async move { ctransport.delete().await });
                 }
             });
             self.handle_tx = Some(Arc::new(handle));
@@ -150,7 +150,7 @@ impl TransportLinkMulticast {
             let c_signal = self.signal_rx.clone();
             let c_rx_buffer_size = self.transport.manager.config.link_rx_buffer_size;
 
-            let handle = task::spawn(async move {
+            let handle = zenoh_runtime::ZRuntime::RX.handle().spawn(async move {
                 // Start the consume task
                 let res = rx_task(
                     c_link.clone(),
@@ -165,7 +165,7 @@ impl TransportLinkMulticast {
                     log::debug!("{}", e);
                     // Spawn a task to avoid a deadlock waiting for this same task
                     // to finish in the close() joining its handle
-                    task::spawn(async move { ctransport.delete().await });
+                    zenoh_runtime::ZRuntime::Net.handle().spawn(async move { ctransport.delete().await });
                 }
             });
             self.handle_rx = Some(Arc::new(handle));
