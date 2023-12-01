@@ -11,7 +11,6 @@
 // Contributors:
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
-#[cfg(feature = "transport_unixpipe")]
 use super::link::send_with_link;
 #[cfg(feature = "stats")]
 use crate::stats::TransportStats;
@@ -23,7 +22,9 @@ use async_trait::async_trait;
 use std::sync::{Arc, RwLock as SyncRwLock};
 use std::time::Duration;
 use tokio::sync::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard, RwLock};
-use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
+use zenoh_core::zasyncwrite;
 use zenoh_core::{zasynclock, zasyncread, zread, zwrite};
 #[cfg(feature = "transport_unixpipe")]
 use zenoh_link::unixpipe::UNIXPIPE_LOCATOR_PREFIX;
@@ -32,12 +33,14 @@ use zenoh_link::Link;
 use zenoh_link::{LinkUnicast, LinkUnicastDirection};
 use zenoh_protocol::core::{WhatAmI, ZenohId};
 use zenoh_protocol::network::NetworkMessage;
+use zenoh_protocol::transport::KeepAlive;
 use zenoh_protocol::transport::TransportBodyLowLatency;
 use zenoh_protocol::transport::TransportMessageLowLatency;
 use zenoh_protocol::transport::{Close, TransportSn};
 #[cfg(not(feature = "transport_unixpipe"))]
 use zenoh_result::bail;
 use zenoh_result::{zerror, ZResult};
+use zenoh_runtime::ZRuntime;
 
 /*************************************/
 /*       LOW-LATENCY TRANSPORT       */
@@ -58,9 +61,9 @@ pub(crate) struct TransportUnicastLowlatency {
     #[cfg(feature = "stats")]
     pub(super) stats: Arc<TransportStats>,
 
-    // The flags to stop TX/RX tasks
-    pub(crate) handle_keepalive: Arc<RwLock<Option<JoinHandle<()>>>>,
-    pub(crate) handle_rx: Arc<RwLock<Option<JoinHandle<()>>>>,
+    pub(crate) msg_queue_tx: Arc<SyncRwLock<Option<flume::Sender<TransportMessageLowLatency>>>>,
+    pub(crate) cancellation_token: CancellationToken,
+    pub(crate) task_tracker: TaskTracker,
 }
 
 impl TransportUnicastLowlatency {
@@ -79,8 +82,9 @@ impl TransportUnicastLowlatency {
             alive: Arc::new(AsyncMutex::new(false)),
             #[cfg(feature = "stats")]
             stats,
-            handle_keepalive: Arc::new(RwLock::new(None)),
-            handle_rx: Arc::new(RwLock::new(None)),
+            msg_queue_tx: Arc::new(SyncRwLock::new(None)),
+            cancellation_token: CancellationToken::new(),
+            task_tracker: TaskTracker::new(),
         };
 
         Ok(t)
@@ -130,9 +134,10 @@ impl TransportUnicastLowlatency {
         let _ = self.manager.del_transport_unicast(&self.config.zid).await;
 
         // Close and drop the link
-        self.stop_keepalive().await;
-        self.stop_rx().await;
-        let _ = zasyncread!(self.link).close().await;
+        self.cancellation_token.cancel();
+        self.task_tracker.close();
+        self.task_tracker.wait().await;
+        zasyncread!(self.link).close().await?;
 
         // Notify the callback that we have closed the transport
         if let Some(cb) = callback.as_ref() {
@@ -202,7 +207,54 @@ impl TransportUnicastTrait for TransportUnicastLowlatency {
     }
 
     fn start_tx(&self, _link: &LinkUnicast, keep_alive: Duration, _batch_size: u16) -> ZResult<()> {
-        self.start_keepalive(keep_alive);
+        let token = self.cancellation_token.child_token();
+
+        // TODO: Check the necessity of clone
+        let link = self.link.clone();
+        let transport = self.clone();
+
+        // TODO: Dangerous?
+        let (tx, rx) = flume::unbounded();
+        *self.msg_queue_tx.try_write().map_err(|e| zerror!("{e}"))? = Some(tx);
+
+        let task = async move {
+            loop {
+                tokio::select! {
+                    // Send out the message
+                    res = rx.recv_async() => {
+                        let msg = res?;
+                        transport.send_async(msg).await?;
+                    }
+
+                    // Send KeepAlive periodically
+                    _ = tokio::time::sleep(keep_alive.clone()) => {
+                        // TODO: Don not create a new message every time
+                        let keepailve = TransportMessageLowLatency {
+                            body: TransportBodyLowLatency::KeepAlive(KeepAlive),
+                        };
+                        // TODO: Check the necessity of this guard
+                        let guard = zasyncwrite!(link);
+
+                        // TODO: Why this is bounded by the feature?
+                        let _ = send_with_link(
+                            &guard,
+                            keepailve,
+                            #[cfg(feature = "stats")]
+                            &stats,
+                        )
+                        .await;
+                        drop(guard);
+                    }
+
+                    // Stop if cancelled
+                    _ = token.cancelled() => {
+                        break
+                    }
+                }
+            }
+            ZResult::Ok(())
+        };
+        self.task_tracker.spawn_on(task, &ZRuntime::TX);
         Ok(())
     }
 
