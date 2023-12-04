@@ -16,7 +16,6 @@ use crate::transport_unicast_inner::TransportUnicastTrait;
 use super::transport::TransportUnicastUniversal;
 use crate::common::priority::TransportChannelRx;
 use std::sync::MutexGuard;
-use tokio::task;
 use zenoh_buffers::{
     reader::{HasReader, Reader},
     ZSlice,
@@ -72,7 +71,7 @@ impl TransportUnicastUniversal {
         let c_link = link.clone();
         // Spawn a task to avoid a deadlock waiting for this same task
         // to finish in the link close() joining the rx handle
-        zenoh_runtime::ZRuntime::Net.handle().spawn(async move {
+        zenoh_runtime::ZRuntime::Net.spawn(async move {
             if session {
                 let _ = c_transport.delete().await;
             } else {

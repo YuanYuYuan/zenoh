@@ -294,7 +294,7 @@ impl UnicastPipeListener {
 
         // create listening task
         let listening_task_handle = tokio::task::spawn_blocking(move || {
-            ZRuntime::Accept.handle().block_on(async move {
+            ZRuntime::Accept.block_on(async move {
                 loop {
                     let _ = handle_incoming_connections(
                         &endpoint,
@@ -565,7 +565,6 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastPipe {
     fn get_listeners(&self) -> Vec<EndPoint> {
         tokio::task::block_in_place(|| {
             ZRuntime::Net
-                .handle()
                 .block_on(async { zasyncread!(self.listeners) })
                 .keys()
                 .cloned()
@@ -576,7 +575,6 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastPipe {
     fn get_locators(&self) -> Vec<Locator> {
         tokio::task::block_in_place(|| {
             ZRuntime::Net
-                .handle()
                 .block_on(async { zasyncread!(self.listeners) })
                 .values()
                 .map(|v| v.uplink_locator.clone())

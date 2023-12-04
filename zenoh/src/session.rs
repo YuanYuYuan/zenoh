@@ -47,7 +47,6 @@ use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Duration;
-use tokio::task;
 use uhlc::HLC;
 use zenoh_buffers::ZBuf;
 use zenoh_collections::SingleOrVec;
@@ -1589,7 +1588,7 @@ impl Session {
             Locality::Any => 2,
             _ => 1,
         };
-        zenoh_runtime::ZRuntime::Net.handle().spawn({
+        zenoh_runtime::ZRuntime::Net.spawn({
             let state = self.state.clone();
             let zid = self.runtime.zid;
             async move {
