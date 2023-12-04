@@ -14,7 +14,7 @@
 use super::transport::TransportUnicastLowlatency;
 #[cfg(feature = "stats")]
 use crate::stats::TransportStats;
-use crate::TransportExecutor;
+// use crate::TransportExecutor;
 use tokio::{sync::RwLock, task};
 use zenoh_codec::*;
 use zenoh_core::{zasyncread, zasyncwrite};
@@ -89,10 +89,14 @@ impl TransportUnicastLowlatency {
         .await
     }
 
-    pub(super) fn start_keepalive(&self, executor: &TransportExecutor, keep_alive: Duration) {
+    pub(super) fn start_keepalive(
+        &self,
+        // executor: &TransportExecutor,
+        keep_alive: Duration,
+    ) {
         let mut guard = async_global_executor::block_on(async { zasyncwrite!(self.handle_keepalive) });
         let c_transport = self.clone();
-        let handle = executor.runtime.spawn(async move {
+        let handle = zenoh_runtime::ZRuntime::TX.spawn(async move {
             let res = keepalive_task(
                 c_transport.link.clone(),
                 keep_alive,

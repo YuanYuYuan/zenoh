@@ -19,7 +19,7 @@ use crate::common::pipeline::{
 use crate::common::priority::TransportPriorityTx;
 #[cfg(feature = "stats")]
 use crate::common::stats::TransportStats;
-use crate::TransportExecutor;
+// use crate::TransportExecutor;
 use tokio::task;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
@@ -92,7 +92,7 @@ impl TransportLinkUnicast {
 impl TransportLinkUnicast {
     pub(super) fn start_tx(
         &mut self,
-        executor: &TransportExecutor,
+        // executor: &TransportExecutor,
         keep_alive: Duration,
         batch_size: u16,
         priority_tx: &[TransportPriorityTx],
@@ -115,7 +115,7 @@ impl TransportLinkUnicast {
             // Spawn the TX task
             let c_link = self.link.clone();
             let c_transport = self.transport.clone();
-            let handle = executor.runtime.spawn(async move {
+            let handle = zenoh_runtime::ZRuntime::TX.spawn(async move {
                 let res = tx_task(
                     consumer,
                     c_link.clone(),

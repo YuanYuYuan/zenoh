@@ -74,6 +74,7 @@ zenoh-result = { workspace = true }
 zenoh-shm = { workspace = true, optional = true }
 zenoh-sync = { workspace = true }
 zenoh-util = { workspace = true }
+zenoh-runtime = { workspace = true }
 
 [dev-dependencies]
 futures-util = { workspace = true }

@@ -24,7 +24,11 @@ use zenoh_protocol::{
 };
 use zenoh_result::ZResult;
 
-use crate::{TransportConfigUnicast, TransportExecutor, TransportPeerEventHandler};
+use crate::{
+    TransportConfigUnicast,
+    // TransportExecutor,
+    TransportPeerEventHandler,
+};
 
 /*************************************/
 /*      UNICAST TRANSPORT TRAIT      */
@@ -59,7 +63,7 @@ pub(crate) trait TransportUnicastTrait: Send + Sync {
     fn start_tx(
         &self,
         link: &LinkUnicast,
-        executor: &TransportExecutor,
+        // executor: &TransportExecutor,
         keep_alive: Duration,
         batch_size: u16,
     ) -> ZResult<()>;

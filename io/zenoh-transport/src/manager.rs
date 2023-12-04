@@ -316,27 +316,27 @@ impl Default for TransportManagerBuilder {
     }
 }
 
-pub(crate) struct TransportExecutor {
-    pub runtime: tokio::runtime::Runtime,
-}
-
-impl TransportExecutor {
-    fn new(num_threads: usize) -> ZResult<Self> {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use tokio::runtime::Builder;
-        let runtime = Builder::new_multi_thread()
-            .enable_time()
-            .worker_threads(num_threads)
-            .thread_name_fn(|| {
-                static ATOMIC_TX_THREAD_ID: AtomicUsize = AtomicUsize::new(0);
-                let id = ATOMIC_TX_THREAD_ID.fetch_add(1, Ordering::SeqCst);
-                format!("zenoh-tx-{}", id)
-            })
-            .build()?;
-        Ok(TransportExecutor { runtime })
-    }
-}
-
+// pub(crate) struct TransportExecutor {
+//     pub runtime: tokio::runtime::Runtime,
+// }
+//
+// impl TransportExecutor {
+//     fn new(num_threads: usize) -> ZResult<Self> {
+//         use std::sync::atomic::{AtomicUsize, Ordering};
+//         use tokio::runtime::Builder;
+//         let runtime = Builder::new_multi_thread()
+//             .enable_time()
+//             .worker_threads(num_threads)
+//             .thread_name_fn(|| {
+//                 static ATOMIC_TX_THREAD_ID: AtomicUsize = AtomicUsize::new(0);
+//                 let id = ATOMIC_TX_THREAD_ID.fetch_add(1, Ordering::SeqCst);
+//                 format!("zenoh-tx-{}", id)
+//             })
+//             .build()?;
+//         Ok(TransportExecutor { runtime })
+//     }
+// }
+//
 #[derive(Clone)]
 pub struct TransportManager {
     pub config: Arc<TransportManagerConfig>,
@@ -345,7 +345,7 @@ pub struct TransportManager {
     pub(crate) cipher: Arc<BlockCipher>,
     pub(crate) locator_inspector: zenoh_link::LocatorInspector,
     pub(crate) new_unicast_link_sender: NewLinkChannelSender,
-    pub(crate) tx_executor: Arc<TransportExecutor>,
+    // pub(crate) tx_executor: Arc<TransportExecutor>,
     #[cfg(feature = "stats")]
     pub(crate) stats: Arc<crate::stats::TransportStats>,
 }
@@ -368,7 +368,7 @@ impl TransportManager {
             cipher: Arc::new(cipher),
             locator_inspector: Default::default(),
             new_unicast_link_sender,
-            tx_executor: Arc::new(TransportExecutor::new(tx_threads).unwrap()),
+            // tx_executor: Arc::new(TransportExecutor::new(tx_threads).unwrap()),
             #[cfg(feature = "stats")]
             stats: std::sync::Arc::new(crate::stats::TransportStats::default()),
         };

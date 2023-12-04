@@ -50,3 +50,4 @@ zenoh-link-ws = { workspace = true, optional = true }
 zenoh-link-unixpipe = { workspace = true, optional = true }
 zenoh-protocol = { workspace = true }
 zenoh-result = { workspace = true }
+zenoh-runtime = { workspace = true }
