@@ -20,3 +20,6 @@
 .vscode
 
 cargo-timing*.html
+
+_*
+Cargo.lock
