@@ -441,8 +441,8 @@ impl TransportManager {
     }
 
     pub fn get_locators(&self) -> Vec<Locator> {
-        let mut lsu = async_global_executor::block_on(self.get_locators_unicast());
-        let mut lsm = async_global_executor::block_on(self.get_locators_multicast());
+        let mut lsu = zenoh_runtime::test_block_on(self.get_locators_unicast());
+        let mut lsm = zenoh_runtime::test_block_on(self.get_locators_multicast());
         lsu.append(&mut lsm);
         lsu
     }

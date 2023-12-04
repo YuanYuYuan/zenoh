@@ -6,6 +6,13 @@ use std::sync::{Mutex, OnceLock};
 use tokio::runtime::{Handle, Runtime};
 use zenoh_result::{zerror, ZResult as Result};
 
+
+pub fn test_block_on<F: std::future::Future>(f: F) -> F::Output {
+    tokio::task::block_in_place(|| {
+        ZRuntime::Application.block_on(f)
+    })
+}
+
 #[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
 pub enum ZRuntime {
     TX,

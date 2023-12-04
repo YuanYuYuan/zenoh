@@ -163,7 +163,7 @@ impl LinkUnicastTrait for LinkUnicastTcp {
 impl Drop for LinkUnicastTcp {
     fn drop(&mut self) {
         // Close the underlying TCP socket
-        async_global_executor::block_on(async {
+        zenoh_runtime::test_block_on(async {
             let _ = self.get_mut_socket().shutdown().await;
         });
     }

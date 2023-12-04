@@ -75,7 +75,7 @@ pub(crate) async fn send_with_link(
 
 impl TransportUnicastLowlatency {
     pub(super) fn send(&self, msg: TransportMessageLowLatency) -> ZResult<()> {
-        async_global_executor::block_on(self.send_async(msg))
+        zenoh_runtime::test_block_on(self.send_async(msg))
     }
 
     pub(super) async fn send_async(&self, msg: TransportMessageLowLatency) -> ZResult<()> {
@@ -94,7 +94,7 @@ impl TransportUnicastLowlatency {
         // executor: &TransportExecutor,
         keep_alive: Duration,
     ) {
-        let mut guard = async_global_executor::block_on(async { zasyncwrite!(self.handle_keepalive) });
+        let mut guard = zenoh_runtime::test_block_on(async { zasyncwrite!(self.handle_keepalive) });
         let c_transport = self.clone();
         let handle = zenoh_runtime::ZRuntime::TX.spawn(async move {
             let res = keepalive_task(
@@ -135,7 +135,7 @@ impl TransportUnicastLowlatency {
     }
 
     pub(super) fn internal_start_rx(&self, lease: Duration, batch_size: u16) {
-        let mut guard = async_global_executor::block_on(async { zasyncwrite!(self.handle_rx) });
+        let mut guard = zenoh_runtime::test_block_on(async { zasyncwrite!(self.handle_rx) });
         let c_transport = self.clone();
         let handle = task::spawn(async move {
             let guard = zasyncread!(c_transport.link);

@@ -293,7 +293,7 @@ impl UnicastPipeListener {
 
         // create listening task
         let listening_task_handle = tokio::task::spawn_blocking(move || {
-            async_global_executor::block_on(async move {
+            zenoh_runtime::test_block_on(async move {
                 loop {
                     let _ = handle_incoming_connections(
                         &endpoint,
@@ -562,14 +562,14 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastPipe {
     }
 
     fn get_listeners(&self) -> Vec<EndPoint> {
-        async_global_executor::block_on(async { zasyncread!(self.listeners) })
+        zenoh_runtime::test_block_on(async { zasyncread!(self.listeners) })
             .keys()
             .cloned()
             .collect()
     }
 
     fn get_locators(&self) -> Vec<Locator> {
-        async_global_executor::block_on(async { zasyncread!(self.listeners) })
+        zenoh_runtime::test_block_on(async { zasyncread!(self.listeners) })
             .values()
             .map(|v| v.uplink_locator.clone())
             .collect()
