@@ -293,7 +293,8 @@ impl UnicastPipeListener {
 
         // create listening task
         let listening_task_handle = tokio::task::spawn_blocking(move || {
-            zenoh_runtime::test_block_on(async move {
+            async_global_executor::block_on(async move {
+            // zenoh_runtime::test_block_on(async move {
                 loop {
                     let _ = handle_incoming_connections(
                         &endpoint,
