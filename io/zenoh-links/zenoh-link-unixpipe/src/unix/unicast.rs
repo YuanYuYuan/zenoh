@@ -16,12 +16,14 @@ use crate::config;
 use advisory_lock::{AdvisoryFileLock, FileLockMode};
 use async_trait::async_trait;
 use filepath::FilePath;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use tokio::fs::remove_file;
 use tokio::io::unix::AsyncFd;
 use tokio::task::JoinHandle;
 // use filepath::FilePath;
 use nix::unistd::unlink;
+use nix::libc;
+use std::os::unix::fs::OpenOptionsExt;
 use rand::Rng;
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
@@ -33,7 +35,7 @@ use tokio::io::Interest;
 use zenoh_core::{zasyncread, zasyncwrite};
 use zenoh_protocol::core::{EndPoint, Locator};
 
-use unix_named_pipe::{create, open_read, open_write};
+use unix_named_pipe::{create, open_write};
 
 use zenoh_link_commons::{
     ConstructibleLinkManagerUnicast, LinkManagerUnicastTrait, LinkUnicast, LinkUnicastTrait,
@@ -164,7 +166,11 @@ impl PipeR {
     }
 
     fn open_unique_pipe_for_read(path: &str) -> ZResult<File> {
-        let read = open_read(path)?;
+        let read = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path)?;
         #[cfg(not(target_os = "macos"))]
         read.try_lock(FileLockMode::Exclusive)?;
         Ok(read)
@@ -293,8 +299,8 @@ impl UnicastPipeListener {
 
         // create listening task
         let listening_task_handle = tokio::task::spawn_blocking(move || {
-            async_global_executor::block_on(async move {
-            // zenoh_runtime::test_block_on(async move {
+            // async_global_executor::block_on(async move {
+            zenoh_runtime::test_block_on(async move {
                 loop {
                     let _ = handle_incoming_connections(
                         &endpoint,
