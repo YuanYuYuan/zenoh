@@ -93,10 +93,7 @@ impl TransportManagerBuilderMulticast {
         self
     }
 
-    pub fn from_config(
-        mut self,
-        config: &Config,
-    ) -> ZResult<TransportManagerBuilderMulticast> {
+    pub fn from_config(mut self, config: &Config) -> ZResult<TransportManagerBuilderMulticast> {
         self = self.lease(Duration::from_millis(
             *config.transport().link().tx().lease(),
         ));
@@ -192,7 +189,11 @@ impl TransportManager {
             Some(lm) => Ok(lm.clone()),
             None => {
                 let lm = LinkManagerBuilderMulticast::make(protocol)?;
-                let _ = self.state.multicast.protocols.insert(protocol.to_string(), lm.clone());
+                let _ = self
+                    .state
+                    .multicast
+                    .protocols
+                    .insert(protocol.to_string(), lm.clone());
                 Ok(lm)
             }
         }
@@ -265,7 +266,9 @@ impl TransportManager {
     }
 
     pub async fn get_transports_multicast(&self) -> Vec<TransportMulticast> {
-        self.state.multicast.transports
+        self.state
+            .multicast
+            .transports
             .iter()
             .map(|t| t.value().into())
             .collect()
@@ -274,12 +277,14 @@ impl TransportManager {
     pub(super) async fn del_transport_multicast(&self, locator: &Locator) -> ZResult<()> {
         let res = self.state.multicast.transports.remove(locator);
 
-        if !self.state.multicast.transports
+        if !self
+            .state
+            .multicast
+            .transports
             .iter()
             .any(|pair| pair.key().protocol() == locator.protocol())
         {
-            self
-                .del_link_manager_multicast(locator.protocol().as_str())?;
+            self.del_link_manager_multicast(locator.protocol().as_str())?;
         }
 
         res.map(|_| ()).ok_or_else(|| {
@@ -303,12 +308,14 @@ impl TransportManager {
 
         let res = self.state.multicast.transports.remove(&locator);
 
-        if !self.state.multicast.transports
+        if !self
+            .state
+            .multicast
+            .transports
             .iter()
             .any(|pair| pair.key().protocol() == locator.protocol())
         {
-            self
-                .del_link_manager_multicast(locator.protocol().as_str())?;
+            self.del_link_manager_multicast(locator.protocol().as_str())?;
         }
 
         res.map(|_| ()).ok_or_else(|| {
@@ -319,14 +326,18 @@ impl TransportManager {
     }
 
     pub fn get_listeners_multicast(&self) -> Vec<EndPoint> {
-        self.state.multicast.transports
+        self.state
+            .multicast
+            .transports
             .iter()
             .map(|t| t.locator.clone().into())
             .collect()
     }
 
     pub fn get_locators_multicast(&self) -> Vec<Locator> {
-        self.state.multicast.transports
+        self.state
+            .multicast
+            .transports
             .iter()
             .map(|t| t.locator.clone())
             .collect()
