@@ -13,7 +13,7 @@
 //
 use async_std::{prelude::FutureExt, task};
 use std::{convert::TryFrom, sync::Arc, time::Duration};
-use zenoh_core::zasync_executor_init;
+use zenoh_core::ztimeout;
 use zenoh_link::EndPoint;
 use zenoh_protocol::core::{WhatAmI, ZenohId};
 use zenoh_result::ZResult;
@@ -25,12 +25,6 @@ use zenoh_transport::{
 
 const TIMEOUT: Duration = Duration::from_secs(60);
 const SLEEP: Duration = Duration::from_millis(100);
-
-macro_rules! ztimeout {
-    ($f:expr) => {
-        $f.timeout(TIMEOUT).await.unwrap()
-    };
-}
 
 #[cfg(test)]
 #[derive(Default)]
@@ -468,7 +462,6 @@ async fn openclose_lowlatency_transport(endpoint: &EndPoint) {
 fn openclose_tcp_only() {
     let _ = env_logger::try_init();
     task::block_on(async {
-        zasync_executor_init!();
     });
 
     let endpoint: EndPoint = format!("tcp/127.0.0.1:{}", 13000).parse().unwrap();
@@ -480,7 +473,6 @@ fn openclose_tcp_only() {
 fn openclose_tcp_only_with_lowlatency_transport() {
     let _ = env_logger::try_init();
     task::block_on(async {
-        zasync_executor_init!();
     });
 
     let endpoint: EndPoint = format!("tcp/127.0.0.1:{}", 13100).parse().unwrap();
@@ -492,7 +484,6 @@ fn openclose_tcp_only_with_lowlatency_transport() {
 fn openclose_udp_only() {
     let _ = env_logger::try_init();
     task::block_on(async {
-        zasync_executor_init!();
     });
 
     let endpoint: EndPoint = format!("udp/127.0.0.1:{}", 13010).parse().unwrap();
@@ -504,7 +495,6 @@ fn openclose_udp_only() {
 fn openclose_udp_only_with_lowlatency_transport() {
     let _ = env_logger::try_init();
     task::block_on(async {
-        zasync_executor_init!();
     });
 
     let endpoint: EndPoint = format!("udp/127.0.0.1:{}", 13110).parse().unwrap();
@@ -517,7 +507,6 @@ fn openclose_udp_only_with_lowlatency_transport() {
 fn openclose_ws_only() {
     let _ = env_logger::try_init();
     task::block_on(async {
-        zasync_executor_init!();
     });
 
     let endpoint: EndPoint = format!("ws/127.0.0.1:{}", 13020).parse().unwrap();
@@ -530,7 +519,6 @@ fn openclose_ws_only() {
 fn openclose_ws_only_with_lowlatency_transport() {
     let _ = env_logger::try_init();
     task::block_on(async {
-        zasync_executor_init!();
     });
 
     let endpoint: EndPoint = format!("ws/127.0.0.1:{}", 13120).parse().unwrap();
@@ -543,7 +531,6 @@ fn openclose_ws_only_with_lowlatency_transport() {
 fn openclose_unixpipe_only() {
     let _ = env_logger::try_init();
     task::block_on(async {
-        zasync_executor_init!();
     });
 
     let endpoint: EndPoint = "unixpipe/openclose_unixpipe_only".parse().unwrap();
@@ -556,7 +543,6 @@ fn openclose_unixpipe_only() {
 fn openclose_unixpipe_only_with_lowlatency_transport() {
     let _ = env_logger::try_init();
     task::block_on(async {
-        zasync_executor_init!();
     });
 
     let endpoint: EndPoint = "unixpipe/openclose_unixpipe_only_with_lowlatency_transport"
@@ -571,7 +557,6 @@ fn openclose_unixpipe_only_with_lowlatency_transport() {
 fn openclose_unix_only() {
     let _ = env_logger::try_init();
     task::block_on(async {
-        zasync_executor_init!();
     });
 
     let f1 = "zenoh-test-unix-socket-9.sock";
@@ -589,7 +574,6 @@ fn openclose_tls_only() {
 
     let _ = env_logger::try_init();
     task::block_on(async {
-        zasync_executor_init!();
     });
 
     // NOTE: this an auto-generated pair of certificate and key.
@@ -690,7 +674,6 @@ fn openclose_quic_only() {
     use zenoh_link::quic::config::*;
 
     task::block_on(async {
-        zasync_executor_init!();
     });
 
     // NOTE: this an auto-generated pair of certificate and key.

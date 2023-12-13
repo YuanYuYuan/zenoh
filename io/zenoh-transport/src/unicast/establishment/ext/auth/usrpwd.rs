@@ -445,7 +445,6 @@ impl<'a> AcceptFsm for AuthUsrPwdFsm<'a> {
 mod tests {
     #[test]
     fn authenticator_usrpwd_config() {
-        use zenoh_core::zasync_executor_init;
 
         async fn inner() {
             use super::AuthUsrPwd;
@@ -500,7 +499,6 @@ mod tests {
         }
 
         async_std::task::block_on(async {
-            zasync_executor_init!();
             inner().await;
         });
     }
