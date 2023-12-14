@@ -11,7 +11,6 @@
 // Contributors:
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
-use async_std::task;
 use clap::{ArgMatches, Command};
 use futures::future;
 use git_version::git_version;
@@ -29,21 +28,21 @@ lazy_static::lazy_static!(
 
 const DEFAULT_LISTENER: &str = "tcp/[::]:7447";
 
-fn main() {
-    task::block_on(async {
-        let mut log_builder =
-            env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("z=info"));
-        #[cfg(feature = "stats")]
-        log_builder.format_timestamp_millis().init();
-        #[cfg(not(feature = "stats"))]
-        log_builder.init();
+#[tokio::main]
+async fn main() {
+    let mut log_builder =
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("z=info"));
+    #[cfg(feature = "stats")]
+    log_builder.format_timestamp_millis().init();
+    #[cfg(not(feature = "stats"))]
+    log_builder.init();
 
-        log::info!("zenohd {}", *LONG_VERSION);
+    log::info!("zenohd {}", *LONG_VERSION);
 
-        let app = Command::new("The zenoh router")
-            .version(GIT_VERSION)
-            .long_version(LONG_VERSION.as_str()).args(
-                &[
+    let app = Command::new("The zenoh router")
+        .version(GIT_VERSION)
+        .long_version(LONG_VERSION.as_str()).args(
+            &[
 clap::arg!(-c --config [FILE] "The configuration file. Currently, this file must be a valid JSON5 or YAML file."),
 clap::Arg::new("listen").short('l').long("listen").value_name("ENDPOINT").help(r"A locator on which this router will listen for incoming sessions.
 Repeat this option to open several listeners.").takes_value(true).multiple_occurrences(true),
@@ -58,96 +57,95 @@ Repeat this option to specify several search directories."),
 clap::arg!(--"no-timestamp" r"By default zenohd adds a HLC-generated Timestamp to each routed Data if there isn't already one. This option disables this feature."),
 clap::arg!(--"no-multicast-scouting" r"By default zenohd replies to multicast scouting messages for being discovered by peers and clients. This option disables this feature."),
 clap::arg!(--"rest-http-port" [SOCKET] r"Configures HTTP interface for the REST API (enabled by default). Accepted values:
-  - a port number
-  - a string with format `<local_ip>:<port_number>` (to bind the HTTP server to a specific interface)
-  - `none` to disable the REST API
+- a port number
+- a string with format `<local_ip>:<port_number>` (to bind the HTTP server to a specific interface)
+- `none` to disable the REST API
 ").default_value("8000").multiple_values(false).multiple_occurrences(false),
 clap::Arg::new("cfg").long("cfg").takes_value(true).multiple_occurrences(true).value_name("KEY:VALUE").help(
 r#"Allows arbitrary configuration changes as column-separated KEY:VALUE pairs, where:
-  - KEY must be a valid config path.
-  - VALUE must be a valid JSON5 string that can be deserialized to the expected type for the KEY field.
+- KEY must be a valid config path.
+- VALUE must be a valid JSON5 string that can be deserialized to the expected type for the KEY field.
 Examples:
 --cfg='startup/subscribe:["demo/**"]'
 --cfg='plugins/storage_manager/storages/demo:{key_expr:"demo/example/**",volume:"memory"}'"#),
 clap::Arg::new("adminspace-permissions").long("adminspace-permissions").value_name("[r|w|rw|none]").help(r"Configure the read and/or write permissions on the admin space. Default is read only."),
-                ]
-            );
-        let args = app.get_matches();
-        let config = config_from_args(&args);
-        log::info!("Initial conf: {}", &config);
+            ]
+        );
+    let args = app.get_matches();
+    let config = config_from_args(&args);
+    log::info!("Initial conf: {}", &config);
 
-        let mut plugins = PluginsManager::dynamic(config.libloader());
-        // Static plugins are to be added here, with `.add_static::<PluginType>()`
-        let mut required_plugins = HashSet::new();
-        for plugin_load in config.plugins().load_requests() {
-            let PluginLoad {
-                name,
-                paths,
-                required,
-            } = plugin_load;
-            log::info!(
-                "Loading {req} plugin \"{name}\"",
-                req = if required { "required" } else { "" }
-            );
-            if let Err(e) = match paths {
-                None => plugins.load_plugin_by_name(name.clone()),
-                Some(paths) => plugins.load_plugin_by_paths(name.clone(), &paths),
-            } {
-                if required {
-                    panic!("Plugin load failure: {}", e)
-                } else {
-                    log::error!("Plugin load failure: {}", e)
-                }
-            }
+    let mut plugins = PluginsManager::dynamic(config.libloader());
+    // Static plugins are to be added here, with `.add_static::<PluginType>()`
+    let mut required_plugins = HashSet::new();
+    for plugin_load in config.plugins().load_requests() {
+        let PluginLoad {
+            name,
+            paths,
+            required,
+        } = plugin_load;
+        log::info!(
+            "Loading {req} plugin \"{name}\"",
+            req = if required { "required" } else { "" }
+        );
+        if let Err(e) = match paths {
+            None => plugins.load_plugin_by_name(name.clone()),
+            Some(paths) => plugins.load_plugin_by_paths(name.clone(), &paths),
+        } {
             if required {
-                required_plugins.insert(name);
+                panic!("Plugin load failure: {}", e)
+            } else {
+                log::error!("Plugin load failure: {}", e)
             }
         }
+        if required {
+            required_plugins.insert(name);
+        }
+    }
 
-        let runtime = match Runtime::new(config).await {
-            Ok(runtime) => runtime,
+    let runtime = match Runtime::new(config).await {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            println!("{e}. Exiting...");
+            std::process::exit(-1);
+        }
+    };
+
+    for (name, path, start_result) in plugins.start_all(&runtime) {
+        let required = required_plugins.contains(name);
+        log::info!(
+            "Starting {req} plugin \"{name}\"",
+            req = if required { "required" } else { "" }
+        );
+        match start_result {
+            Ok(Some(_)) => log::info!("Successfully started plugin {} from {:?}", name, path),
+            Ok(None) => log::warn!("Plugin {} from {:?} wasn't loaded, as an other plugin by the same name is already running", name, path),
             Err(e) => {
-                println!("{e}. Exiting...");
-                std::process::exit(-1);
-            }
-        };
-
-        for (name, path, start_result) in plugins.start_all(&runtime) {
-            let required = required_plugins.contains(name);
-            log::info!(
-                "Starting {req} plugin \"{name}\"",
-                req = if required { "required" } else { "" }
-            );
-            match start_result {
-                Ok(Some(_)) => log::info!("Successfully started plugin {} from {:?}", name, path),
-                Ok(None) => log::warn!("Plugin {} from {:?} wasn't loaded, as an other plugin by the same name is already running", name, path),
-                Err(e) => {
-                    let report = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| e.to_string())) {
-                        Ok(s) => s,
-                        Err(_) => panic!("Formatting the error from plugin {} ({:?}) failed, this is likely due to ABI unstability.\r\nMake sure your plugin was built with the same version of cargo as zenohd", name, path),
-                    };
-                    if required {
-                        panic!("Plugin \"{name}\" failed to start: {}", if report.is_empty() {"no details provided"} else {report.as_str()});
-                    }else {
-                        log::error!("Required plugin \"{name}\" failed to start: {}", if report.is_empty() {"no details provided"} else {report.as_str()});
-                    }
+                let report = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| e.to_string())) {
+                    Ok(s) => s,
+                    Err(_) => panic!("Formatting the error from plugin {} ({:?}) failed, this is likely due to ABI unstability.\r\nMake sure your plugin was built with the same version of cargo as zenohd", name, path),
+                };
+                if required {
+                    panic!("Plugin \"{name}\" failed to start: {}", if report.is_empty() {"no details provided"} else {report.as_str()});
+                }else {
+                    log::error!("Required plugin \"{name}\" failed to start: {}", if report.is_empty() {"no details provided"} else {report.as_str()});
                 }
             }
         }
-        log::info!("Finished loading plugins");
+    }
+    log::info!("Finished loading plugins");
 
-        {
-            let mut config_guard = runtime.config.lock();
-            for (name, (_, plugin)) in plugins.running_plugins() {
-                let hook = plugin.config_checker();
-                config_guard.add_plugin_validator(name, hook)
-            }
+    {
+        let mut config_guard = runtime.config.lock();
+        for (name, (_, plugin)) in plugins.running_plugins() {
+            let hook = plugin.config_checker();
+            config_guard.add_plugin_validator(name, hook)
         }
+    }
 
-        AdminSpace::start(&runtime, plugins, LONG_VERSION.clone()).await;
+    AdminSpace::start(&runtime, plugins, LONG_VERSION.clone()).await;
 
-        future::pending::<()>().await;
-    });
+    future::pending::<()>().await;
 }
 
 fn config_from_args(args: &ArgMatches) -> Config {
