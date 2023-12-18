@@ -411,7 +411,7 @@ async fn lowlatency_transport_intermittent(endpoint: &EndPoint) {
 }
 
 #[cfg(feature = "transport_tcp")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn transport_tcp_intermittent() {
     let _ = env_logger::try_init();
     let endpoint: EndPoint = format!("tcp/127.0.0.1:{}", 12000).parse().unwrap();
@@ -419,7 +419,7 @@ async fn transport_tcp_intermittent() {
 }
 
 #[cfg(feature = "transport_tcp")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn transport_tcp_intermittent_for_lowlatency_transport() {
     let _ = env_logger::try_init();
     let endpoint: EndPoint = format!("tcp/127.0.0.1:{}", 12100).parse().unwrap();
@@ -427,7 +427,7 @@ async fn transport_tcp_intermittent_for_lowlatency_transport() {
 }
 
 #[cfg(feature = "transport_ws")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore]
 async fn transport_ws_intermittent() {
     let _ = env_logger::try_init();
@@ -436,7 +436,7 @@ async fn transport_ws_intermittent() {
 }
 
 #[cfg(feature = "transport_ws")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore]
 async fn transport_ws_intermittent_for_lowlatency_transport() {
     let _ = env_logger::try_init();
@@ -445,7 +445,7 @@ async fn transport_ws_intermittent_for_lowlatency_transport() {
 }
 
 #[cfg(feature = "transport_unixpipe")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore]
 async fn transport_unixpipe_intermittent() {
     let _ = env_logger::try_init();
@@ -454,7 +454,7 @@ async fn transport_unixpipe_intermittent() {
 }
 
 #[cfg(feature = "transport_unixpipe")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore]
 async fn transport_unixpipe_intermittent_for_lowlatency_transport() {
     let _ = env_logger::try_init();
