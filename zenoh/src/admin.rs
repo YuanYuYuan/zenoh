@@ -127,14 +127,14 @@ impl TransportEventHandler for Handler {
     fn new_unicast(
         &self,
         peer: zenoh_transport::TransportPeer,
-        _transport: zenoh_transport::TransportUnicast,
+        _transport: zenoh_transport::unicast::TransportUnicast,
     ) -> ZResult<Arc<dyn zenoh_transport::TransportPeerEventHandler>> {
         self.new_peer(peer)
     }
 
     fn new_multicast(
         &self,
-        _transport: zenoh_transport::TransportMulticast,
+        _transport: zenoh_transport::multicast::TransportMulticast,
     ) -> ZResult<Arc<dyn zenoh_transport::TransportMulticastEventHandler>> {
         Ok(Arc::new(self.clone()))
     }
@@ -158,6 +158,8 @@ impl TransportMulticastEventHandler for Handler {
                     &expr,
                     Some(info),
                     serde_json::to_vec(&peer).unwrap().into(),
+                    #[cfg(feature = "unstable")]
+                    None,
                 );
                 Ok(Arc::new(PeerHandler {
                     expr,
@@ -205,6 +207,8 @@ impl TransportPeerEventHandler for PeerHandler {
                 .with_suffix(&format!("/link/{}", s.finish())),
             Some(info),
             serde_json::to_vec(&link).unwrap().into(),
+            #[cfg(feature = "unstable")]
+            None,
         );
     }
 
@@ -223,6 +227,8 @@ impl TransportPeerEventHandler for PeerHandler {
                 .with_suffix(&format!("/link/{}", s.finish())),
             Some(info),
             vec![0u8; 0].into(),
+            #[cfg(feature = "unstable")]
+            None,
         );
     }
 
@@ -233,8 +239,14 @@ impl TransportPeerEventHandler for PeerHandler {
             kind: SampleKind::Delete,
             ..Default::default()
         };
-        self.session
-            .handle_data(true, &self.expr, Some(info), vec![0u8; 0].into());
+        self.session.handle_data(
+            true,
+            &self.expr,
+            Some(info),
+            vec![0u8; 0].into(),
+            #[cfg(feature = "unstable")]
+            None,
+        );
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

@@ -315,14 +315,23 @@ async fn gossip() -> Result<()> {
     let ke = String::from("testKeyExprGossip");
     let msg_size = 8;
 
-    let peer1 = Node {
-        name: format!("Pub & Queryable {}", WhatAmI::Peer),
-        connect: vec![locator.clone()],
-        mode: WhatAmI::Peer,
-        con_task: ConcurrentTask::from([
-            SequentialTask::from([
-                Task::Sleep(Duration::from_millis(2000)),
-                Task::Pub(ke.clone(), msg_size),
+        let locator = String::from("tcp/127.0.0.1:17446");
+        let ke = String::from("testKeyExprGossip");
+        let msg_size = 8;
+
+        let peer1 = Node {
+            name: format!("Pub & Queryable {}", WhatAmI::Peer),
+            connect: vec![locator.clone()],
+            mode: WhatAmI::Peer,
+            con_task: ConcurrentTask::from([
+                SequentialTask::from([
+                    Task::Sleep(Duration::from_millis(2000)),
+                    Task::Pub(ke.clone(), msg_size),
+                ]),
+                SequentialTask::from([
+                    Task::Sleep(Duration::from_millis(2000)),
+                    Task::Queryable(ke.clone(), msg_size),
+                ]),
             ]),
             SequentialTask::from([
                 Task::Sleep(Duration::from_millis(2000)),

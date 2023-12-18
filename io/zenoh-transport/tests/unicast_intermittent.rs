@@ -31,10 +31,11 @@ use zenoh_protocol::{
     zenoh::Put,
 };
 use zenoh_result::ZResult;
-use zenoh_transport::test_helpers::make_transport_manager_builder;
 use zenoh_transport::{
-    DummyTransportPeerEventHandler, TransportEventHandler, TransportManager, TransportMulticast,
-    TransportMulticastEventHandler, TransportPeer, TransportPeerEventHandler, TransportUnicast,
+    multicast::TransportMulticast,
+    unicast::{test_helpers::make_transport_manager_builder, TransportUnicast},
+    DummyTransportPeerEventHandler, TransportEventHandler, TransportManager,
+    TransportMulticastEventHandler, TransportPeer, TransportPeerEventHandler,
 };
 
 const MSG_SIZE: usize = 8;
@@ -285,24 +286,22 @@ async fn transport_intermittent(endpoint: &EndPoint, lowlatency_transport: bool)
     /* [4] */
     println!("Transport Intermittent [4a1]");
     let c_router_manager = router_manager.clone();
-    let _ = ztimeout!(tokio::task::spawn_blocking(move || {
-        tokio::runtime::Handle::current().block_on(async {
-            // Create the message to send
-            let message: NetworkMessage = Push {
-                wire_expr: "test".into(),
-                ext_qos: QoSType::new(Priority::default(), CongestionControl::Block, false),
-                ext_tstamp: None,
-                ext_nodeid: NodeIdType::default(),
-                payload: Put {
-                    payload: vec![0u8; MSG_SIZE].into(),
-                    timestamp: None,
-                    encoding: Encoding::default(),
-                    ext_sinfo: None,
-                    #[cfg(feature = "shared-memory")]
-                    ext_shm: None,
-                    ext_unknown: vec![],
-                }
-                .into(),
+    ztimeout!(task::spawn_blocking(move || task::block_on(async {
+        // Create the message to send
+        let message: NetworkMessage = Push {
+            wire_expr: "test".into(),
+            ext_qos: QoSType::new(Priority::default(), CongestionControl::Block, false),
+            ext_tstamp: None,
+            ext_nodeid: NodeIdType::default(),
+            payload: Put {
+                payload: vec![0u8; MSG_SIZE].into(),
+                timestamp: None,
+                encoding: Encoding::default(),
+                ext_sinfo: None,
+                #[cfg(feature = "shared-memory")]
+                ext_shm: None,
+                ext_attachment: None,
+                ext_unknown: vec![],
             }
             .into();
 

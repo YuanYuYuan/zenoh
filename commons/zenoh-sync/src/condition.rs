@@ -15,7 +15,7 @@ use event_listener::{Event, EventListener};
 use std::sync::MutexGuard;
 use tokio::sync::MutexGuard as AysncMutexGuard;
 
-pub type ConditionWaiter = EventListener;
+pub type ConditionWaiter = Pin<Box<EventListener>>;
 /// This is a Condition Variable similar to that provided by POSIX.
 /// As for POSIX condition variables, this assumes that a mutex is
 /// properly used to coordinate behaviour. In other terms there should
