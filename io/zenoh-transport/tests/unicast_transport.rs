@@ -386,7 +386,10 @@ async fn open_transport_unicast(
         let _ = ztimeout!(client_manager.open_transport_unicast(e.clone())).unwrap();
     }
 
-    let client_transport = client_manager.get_transport_unicast(&router_id).unwrap();
+    let client_transport = client_manager
+        .get_transport_unicast(&router_id)
+        .await
+        .unwrap();
 
     // Return the handlers
     (
@@ -1077,9 +1080,6 @@ async fn transport_unicast_tls_only_mutual_success() {
     use zenoh_link::tls::config::*;
 
     let _ = env_logger::try_init();
-    task::block_on(async {
-        zasync_executor_init!();
-    });
 
     let client_auth = "true";
 
@@ -1152,9 +1152,6 @@ async fn transport_unicast_tls_only_mutual_no_client_certs_failure() {
     use zenoh_link::tls::config::*;
 
     let _ = env_logger::try_init();
-    task::block_on(async {
-        zasync_executor_init!();
-    });
 
     // Define the locator
     let mut client_endpoint: EndPoint = ("tls/localhost:10462").parse().unwrap();
@@ -1223,9 +1220,6 @@ fn transport_unicast_tls_only_mutual_wrong_client_certs_failure() {
     use zenoh_link::tls::config::*;
 
     let _ = env_logger::try_init();
-    task::block_on(async {
-        zasync_executor_init!();
-    });
 
     let client_auth = "true";
 

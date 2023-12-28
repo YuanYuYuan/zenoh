@@ -11,7 +11,6 @@
 // Contributors:
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
-use async_std::task;
 use clap::Parser;
 use futures::future;
 use git_version::git_version;
@@ -80,7 +79,11 @@ struct Args {
 }
 
 fn main() {
-    task::block_on(async {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
         let mut log_builder =
             env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("z=info"));
         #[cfg(feature = "stats")]
@@ -88,83 +91,84 @@ fn main() {
         #[cfg(not(feature = "stats"))]
         log_builder.init();
 
-    log::info!("zenohd {}", *LONG_VERSION);
+        log::info!("zenohd {}", *LONG_VERSION);
 
         let args = Args::parse();
         let config = config_from_args(&args);
         log::info!("Initial conf: {}", &config);
 
-    let mut plugins = PluginsManager::dynamic(config.libloader());
-    // Static plugins are to be added here, with `.add_static::<PluginType>()`
-    let mut required_plugins = HashSet::new();
-    for plugin_load in config.plugins().load_requests() {
-        let PluginLoad {
-            name,
-            paths,
-            required,
-        } = plugin_load;
-        log::info!(
-            "Loading {req} plugin \"{name}\"",
-            req = if required { "required" } else { "" }
-        );
-        if let Err(e) = match paths {
-            None => plugins.load_plugin_by_name(name.clone()),
-            Some(paths) => plugins.load_plugin_by_paths(name.clone(), &paths),
-        } {
+        let mut plugins = PluginsManager::dynamic(config.libloader());
+        // Static plugins are to be added here, with `.add_static::<PluginType>()`
+        let mut required_plugins = HashSet::new();
+        for plugin_load in config.plugins().load_requests() {
+            let PluginLoad {
+                name,
+                paths,
+                required,
+            } = plugin_load;
+            log::info!(
+                "Loading {req} plugin \"{name}\"",
+                req = if required { "required" } else { "" }
+            );
+            if let Err(e) = match paths {
+                None => plugins.load_plugin_by_name(name.clone()),
+                Some(paths) => plugins.load_plugin_by_paths(name.clone(), &paths),
+            } {
+                if required {
+                    panic!("Plugin load failure: {}", e)
+                } else {
+                    log::error!("Plugin load failure: {}", e)
+                }
+            }
             if required {
-                panic!("Plugin load failure: {}", e)
-            } else {
-                log::error!("Plugin load failure: {}", e)
+                required_plugins.insert(name);
             }
         }
-        if required {
-            required_plugins.insert(name);
-        }
-    }
 
-    let runtime = match Runtime::new(config).await {
-        Ok(runtime) => runtime,
-        Err(e) => {
-            println!("{e}. Exiting...");
-            std::process::exit(-1);
-        }
-    };
-
-    for (name, path, start_result) in plugins.start_all(&runtime) {
-        let required = required_plugins.contains(name);
-        log::info!(
-            "Starting {req} plugin \"{name}\"",
-            req = if required { "required" } else { "" }
-        );
-        match start_result {
-            Ok(Some(_)) => log::info!("Successfully started plugin {} from {:?}", name, path),
-            Ok(None) => log::warn!("Plugin {} from {:?} wasn't loaded, as an other plugin by the same name is already running", name, path),
+        let runtime = match Runtime::new(config).await {
+            Ok(runtime) => runtime,
             Err(e) => {
-                let report = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| e.to_string())) {
-                    Ok(s) => s,
-                    Err(_) => panic!("Formatting the error from plugin {} ({:?}) failed, this is likely due to ABI unstability.\r\nMake sure your plugin was built with the same version of cargo as zenohd", name, path),
-                };
-                if required {
-                    panic!("Plugin \"{name}\" failed to start: {}", if report.is_empty() {"no details provided"} else {report.as_str()});
-                }else {
-                    log::error!("Required plugin \"{name}\" failed to start: {}", if report.is_empty() {"no details provided"} else {report.as_str()});
+                println!("{e}. Exiting...");
+                std::process::exit(-1);
+            }
+        };
+
+        for (name, path, start_result) in plugins.start_all(&runtime) {
+            let required = required_plugins.contains(name);
+            log::info!(
+                "Starting {req} plugin \"{name}\"",
+                req = if required { "required" } else { "" }
+            );
+            match start_result {
+                Ok(Some(_)) => log::info!("Successfully started plugin {} from {:?}", name, path),
+                Ok(None) => log::warn!("Plugin {} from {:?} wasn't loaded, as an other plugin by the same name is already running", name, path),
+                Err(e) => {
+                    let report = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| e.to_string())) {
+                        Ok(s) => s,
+                        Err(_) => panic!("Formatting the error from plugin {} ({:?}) failed, this is likely due to ABI unstability.\r\nMake sure your plugin was built with the same version of cargo as zenohd", name, path),
+                    };
+                    if required {
+                        panic!("Plugin \"{name}\" failed to start: {}", if report.is_empty() {"no details provided"} else {report.as_str()});
+                    }else {
+                        log::error!("Required plugin \"{name}\" failed to start: {}", if report.is_empty() {"no details provided"} else {report.as_str()});
+                    }
                 }
             }
         }
-    }
-    log::info!("Finished loading plugins");
+        log::info!("Finished loading plugins");
 
-    {
-        let mut config_guard = runtime.config.lock();
-        for (name, (_, plugin)) in plugins.running_plugins() {
-            let hook = plugin.config_checker();
-            config_guard.add_plugin_validator(name, hook)
+        {
+            let mut config_guard = runtime.config.lock();
+            for (name, (_, plugin)) in plugins.running_plugins() {
+                let hook = plugin.config_checker();
+                config_guard.add_plugin_validator(name, hook)
+            }
         }
-    }
 
-    AdminSpace::start(&runtime, plugins, LONG_VERSION.clone()).await;
+        AdminSpace::start(&runtime, plugins, LONG_VERSION.clone()).await;
 
-    future::pending::<()>().await;
+        future::pending::<()>().await;
+    });
 }
 
 fn config_from_args(args: &Args) -> Config {

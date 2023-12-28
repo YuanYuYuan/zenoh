@@ -13,7 +13,6 @@
 //
 #[cfg(feature = "shared-memory")]
 mod tests {
-    use async_std::{prelude::FutureExt, task};
     use rand::{Rng, SeedableRng};
     use std::{
         any::Any,
@@ -25,7 +24,7 @@ mod tests {
         time::Duration,
     };
     use zenoh_buffers::buffer::SplitBuffer;
-    use zenoh_core::zasync_executor_init;
+    use zenoh_core::ztimeout;
     use zenoh_crypto::PseudoRng;
     use zenoh_link::Link;
     use zenoh_protocol::{
@@ -232,12 +231,14 @@ mod tests {
         println!("Transport SHM [2a]");
         let peer_shm02_transport = peer_shm01_manager
             .get_transport_unicast(&peer_shm02)
+            .await
             .unwrap();
         assert!(peer_shm02_transport.is_shm().unwrap());
 
         println!("Transport SHM [2b]");
         let peer_net01_transport = peer_shm01_manager
             .get_transport_unicast(&peer_net01)
+            .await
             .unwrap();
         assert!(!peer_net01_transport.is_shm().unwrap());
 
