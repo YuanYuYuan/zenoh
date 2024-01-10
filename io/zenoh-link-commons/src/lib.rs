@@ -21,6 +21,7 @@
 extern crate alloc;
 
 mod multicast;
+pub mod tls;
 mod unicast;
 
 use alloc::{borrow::ToOwned, boxed::Box, string::String};
