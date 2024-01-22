@@ -13,14 +13,14 @@
 //
 use crate::backends_mgt::StoreIntercept;
 use crate::storages_mgt::StorageMessage;
-use async_std::sync::Arc;
-use async_std::sync::{Mutex, RwLock};
-use async_trait::async_trait;
 use flume::{Receiver, Sender};
 use futures::select;
 use std::collections::{HashMap, HashSet};
 use std::str::{self, FromStr};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::{Mutex, RwLock};
+use tokio_util::sync::CancellationToken;
 use zenoh::buffers::ZBuf;
 use zenoh::prelude::r#async::*;
 use zenoh::query::ConsolidationMode;
@@ -35,7 +35,7 @@ use zenoh_keyexpr::keyexpr_tree::{
     support::NonWild, support::UnknownWildness, IKeyExprTreeExt, IKeyExprTreeExtMut, KeBoxTree,
 };
 use zenoh_result::bail;
-use zenoh_util::{zenoh_home, Timed, TimedEvent, Timer};
+use zenoh_util::zenoh_home;
 
 pub const WILDCARD_UPDATES_FILENAME: &str = "wildcard_updates";
 pub const TOMBSTONE_FILENAME: &str = "tombstones";
@@ -65,6 +65,7 @@ pub struct StorageService {
     in_interceptor: Option<Arc<dyn Fn(Sample) -> Sample + Send + Sync>>,
     out_interceptor: Option<Arc<dyn Fn(Sample) -> Sample + Send + Sync>>,
     replication: Option<ReplicationService>,
+    token: CancellationToken,
 }
 
 impl StorageService {
@@ -90,6 +91,7 @@ impl StorageService {
             in_interceptor: store_intercept.in_interceptor,
             out_interceptor: store_intercept.out_interceptor,
             replication,
+            token: CancellationToken::new(),
         };
         if storage_service
             .capability
@@ -131,16 +133,53 @@ impl StorageService {
         self.initialize_if_empty().await;
 
         // start periodic GC event
-        let t = Timer::default();
-        let gc = TimedEvent::periodic(
-            gc_config.period,
-            GarbageCollectionEvent {
-                config: gc_config,
-                tombstones: self.tombstones.clone(),
-                wildcard_updates: self.wildcard_updates.clone(),
-            },
-        );
-        t.add_async(gc).await;
+        let token = self.token.child_token();
+        let c_tombstones = self.tombstones.clone();
+        let c_wildcard_updates = self.wildcard_updates.clone();
+        let task = async move {
+            let mut interval = tokio::time::interval(gc_config.period);
+            loop {
+                tokio::select! {
+                    _ = token.cancelled() => break,
+                    _ = interval.tick() => {
+                        log::trace!("Start garbage collection");
+                        let time_limit = NTP64::from(SystemTime::now().duration_since(UNIX_EPOCH).unwrap())
+                            - NTP64::from(gc_config.lifespan);
+
+                        // Get lock on fields
+                        let mut tombstones = c_tombstones.write().await;
+                        let mut wildcard_updates = c_wildcard_updates.write().await;
+
+                        let mut to_be_removed = HashSet::new();
+                        for (k, ts) in tombstones.key_value_pairs() {
+                            if ts.get_time() < &time_limit {
+                                // mark key to be removed
+                                to_be_removed.insert(k);
+                            }
+                        }
+                        for k in to_be_removed {
+                            tombstones.remove(&k);
+                        }
+
+                        let mut to_be_removed = HashSet::new();
+                        for (k, update) in wildcard_updates.key_value_pairs() {
+                            let ts = update.data.timestamp;
+                            if ts.get_time() < &time_limit {
+                                // mark key to be removed
+                                to_be_removed.insert(k);
+                            }
+                        }
+                        for k in to_be_removed {
+                            wildcard_updates.remove(&k);
+                        }
+
+                        log::trace!("End garbage collection of obsolete data-infos");
+                    }
+                }
+            }
+        };
+        // TODO: Add this into a TaskTracker properly
+        zenoh_runtime::ZRuntime::Application.spawn(task);
 
         // subscribe on key_expr
         let storage_sub = match self.session.declare_subscriber(&self.key_expr).res().await {
@@ -210,7 +249,7 @@ impl StorageService {
                             },
                             Ok(StorageMessage::GetStatus(tx)) => {
                                 let storage = self.storage.lock().await;
-                                std::mem::drop(tx.send(storage.get_admin_status()).await);
+                                std::mem::drop(tx.send_async(storage.get_admin_status()).await);
                                 drop(storage);
                             }
                             Err(e) => {
@@ -248,7 +287,7 @@ impl StorageService {
                             },
                             Ok(StorageMessage::GetStatus(tx)) => {
                                 let storage = self.storage.lock().await;
-                                std::mem::drop(tx.send(storage.get_admin_status()).await);
+                                std::mem::drop(tx.send_async(storage.get_admin_status()).await);
                                 drop(storage);
                             }
                             Err(e) => {
@@ -706,49 +745,4 @@ fn construct_update(data: String) -> Update {
         SampleKind::Delete
     };
     Update { kind, data }
-}
-
-// Periodic event cleaning-up data info for old metadata
-struct GarbageCollectionEvent {
-    config: GarbageCollectionConfig,
-    tombstones: Arc<RwLock<KeBoxTree<Timestamp, NonWild, KeyedSetProvider>>>,
-    wildcard_updates: Arc<RwLock<KeBoxTree<Update, UnknownWildness, KeyedSetProvider>>>,
-}
-
-#[async_trait]
-impl Timed for GarbageCollectionEvent {
-    async fn run(&mut self) {
-        log::trace!("Start garbage collection");
-        let time_limit = NTP64::from(SystemTime::now().duration_since(UNIX_EPOCH).unwrap())
-            - NTP64::from(self.config.lifespan);
-
-        // Get lock on fields
-        let mut tombstones = self.tombstones.write().await;
-        let mut wildcard_updates = self.wildcard_updates.write().await;
-
-        let mut to_be_removed = HashSet::new();
-        for (k, ts) in tombstones.key_value_pairs() {
-            if ts.get_time() < &time_limit {
-                // mark key to be removed
-                to_be_removed.insert(k);
-            }
-        }
-        for k in to_be_removed {
-            tombstones.remove(&k);
-        }
-
-        let mut to_be_removed = HashSet::new();
-        for (k, update) in wildcard_updates.key_value_pairs() {
-            let ts = update.data.timestamp;
-            if ts.get_time() < &time_limit {
-                // mark key to be removed
-                to_be_removed.insert(k);
-            }
-        }
-        for k in to_be_removed {
-            wildcard_updates.remove(&k);
-        }
-
-        log::trace!("End garbage collection of obsolete data-infos");
-    }
 }

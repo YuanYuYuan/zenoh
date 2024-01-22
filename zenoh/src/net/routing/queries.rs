@@ -18,13 +18,13 @@ use super::resource::{
     SessionContext,
 };
 use super::router::{RoutingExpr, Tables, TablesLock};
-use async_trait::async_trait;
+// use async_trait::async_trait;
 use ordered_float::OrderedFloat;
 use petgraph::graph::NodeIndex;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::convert::TryFrom;
-use std::sync::{Arc, RwLockReadGuard, Weak};
+use std::sync::{Arc, RwLockReadGuard};
 use zenoh_buffers::ZBuf;
 use zenoh_protocol::{
     core::{
@@ -45,7 +45,6 @@ use zenoh_protocol::{
     zenoh::{reply::ext::ConsolidationType, Reply, RequestBody, ResponseBody},
 };
 use zenoh_sync::get_mut_unchecked;
-use zenoh_util::Timed;
 
 pub(crate) struct Query {
     src_face: Arc<FaceState>,
@@ -1878,34 +1877,34 @@ fn compute_local_replies(
     result
 }
 
-#[derive(Clone)]
-struct QueryCleanup {
-    tables: Arc<TablesLock>,
-    face: Weak<FaceState>,
-    qid: RequestId,
-}
+// #[derive(Clone)]
+// struct QueryCleanup {
+//     tables: Arc<TablesLock>,
+//     face: Weak<FaceState>,
+//     qid: RequestId,
+// }
 
-#[async_trait]
-impl Timed for QueryCleanup {
-    async fn run(&mut self) {
-        if let Some(mut face) = self.face.upgrade() {
-            let tables_lock = zwrite!(self.tables.tables);
-            if let Some(query) = get_mut_unchecked(&mut face)
-                .pending_queries
-                .remove(&self.qid)
-            {
-                drop(tables_lock);
-                log::warn!(
-                    "Didn't receive final reply {}:{} from {}: Timeout!",
-                    query.src_face,
-                    self.qid,
-                    face
-                );
-                finalize_pending_query(query);
-            }
-        }
-    }
-}
+// #[async_trait]
+// impl Timed for QueryCleanup {
+//     async fn run(&mut self) {
+//         if let Some(mut face) = self.face.upgrade() {
+//             let tables_lock = zwrite!(self.tables.tables);
+//             if let Some(query) = get_mut_unchecked(&mut face)
+//                 .pending_queries
+//                 .remove(&self.qid)
+//             {
+//                 drop(tables_lock);
+//                 log::warn!(
+//                     "Didn't receive final reply {}:{} from {}: Timeout!",
+//                     query.src_face,
+//                     self.qid,
+//                     face
+//                 );
+//                 finalize_pending_query(query);
+//             }
+//         }
+//     }
+// }
 
 pub(super) fn disable_matches_query_routes(_tables: &mut Tables, res: &mut Arc<Resource>) {
     if res.context.is_some() {

@@ -257,6 +257,7 @@ pub(super) struct TransportLinkMulticastConfigUniversal {
     pub(super) batch_size: BatchSize,
 }
 
+// TODO: Introduce TaskTracker and retire handle_tx, handle_rx, and signal_rx.
 #[derive(Clone)]
 pub(super) struct TransportLinkMulticastUniversal {
     // The underlying link
@@ -327,22 +328,23 @@ impl TransportLinkMulticastUniversal {
 
             // Spawn the TX task
             let c_link = self.link.clone();
-            let ctransport = self.transport.clone();
-            let handle = zenoh_runtime::ZRuntime::TX.spawn(async move {
+            let c_transport = self.transport.clone();
+            let handle = zenoh_runtime::ZRuntime::Transport.spawn(async move {
                 let res = tx_task(
                     consumer,
                     c_link.tx(),
                     config,
                     initial_sns,
                     #[cfg(feature = "stats")]
-                    ctransport.stats.clone(),
+                    c_transport.stats.clone(),
                 )
                 .await;
                 if let Err(e) = res {
                     log::debug!("{}", e);
                     // Spawn a task to avoid a deadlock waiting for this same task
                     // to finish in the close() joining its handle
-                    zenoh_runtime::ZRuntime::Net.spawn(async move { ctransport.delete().await });
+                    zenoh_runtime::ZRuntime::Transport
+                        .spawn(async move { c_transport.delete().await });
                 }
             });
             self.handle_tx = Some(Arc::new(handle));
@@ -359,15 +361,15 @@ impl TransportLinkMulticastUniversal {
         if self.handle_rx.is_none() {
             // Spawn the RX task
             let c_link = self.link.clone();
-            let ctransport = self.transport.clone();
+            let c_transport = self.transport.clone();
             let c_signal = self.signal_rx.clone();
             let c_rx_buffer_size = self.transport.manager.config.link_rx_buffer_size;
 
-            let handle = zenoh_runtime::ZRuntime::RX.spawn(async move {
+            let handle = zenoh_runtime::ZRuntime::Transport.spawn(async move {
                 // Start the consume task
                 let res = rx_task(
                     c_link.rx(),
-                    ctransport.clone(),
+                    c_transport.clone(),
                     c_signal.clone(),
                     c_rx_buffer_size,
                     batch_size,
@@ -378,7 +380,8 @@ impl TransportLinkMulticastUniversal {
                     log::debug!("{}", e);
                     // Spawn a task to avoid a deadlock waiting for this same task
                     // to finish in the close() joining its handle
-                    zenoh_runtime::ZRuntime::Net.spawn(async move { ctransport.delete().await });
+                    zenoh_runtime::ZRuntime::Transport
+                        .spawn(async move { c_transport.delete().await });
                 }
             });
             self.handle_rx = Some(Arc::new(handle));
