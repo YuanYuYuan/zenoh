@@ -25,11 +25,11 @@ use std::fmt;
 use std::io::BufReader;
 use std::net::IpAddr;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Mutex as AsyncMutex, RwLock as AsyncRwLock};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
-use zenoh_core::{zasynclock, zread, zwrite};
+use zenoh_core::{zasynclock, zasyncread, zasyncwrite};
 use zenoh_link_commons::{
     LinkManagerUnicastTrait, LinkUnicast, LinkUnicastTrait, NewLinkChannelSender,
 };
@@ -208,14 +208,14 @@ impl ListenerUnicastQuic {
 
 pub struct LinkManagerUnicastQuic {
     manager: NewLinkChannelSender,
-    listeners: Arc<RwLock<HashMap<SocketAddr, ListenerUnicastQuic>>>,
+    listeners: Arc<AsyncRwLock<HashMap<SocketAddr, ListenerUnicastQuic>>>,
 }
 
 impl LinkManagerUnicastQuic {
     pub fn new(manager: NewLinkChannelSender) -> Self {
         Self {
             manager,
-            listeners: Arc::new(RwLock::new(HashMap::new())),
+            listeners: Arc::new(AsyncRwLock::new(HashMap::new())),
         }
     }
 }
@@ -422,7 +422,7 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastQuic {
         // Spawn the accept loop for the listener
         let token = CancellationToken::new();
         let c_token = token.clone();
-        let mut listeners = zwrite!(self.listeners);
+        let mut listeners = zasyncwrite!(self.listeners);
 
         let c_manager = self.manager.clone();
         let c_listeners = self.listeners.clone();
@@ -432,7 +432,7 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastQuic {
         let task = async move {
             // Wait for the accept loop to terminate
             let res = accept_task(quic_endpoint, c_token, c_manager).await;
-            zwrite!(c_listeners).remove(&c_addr);
+            zasyncwrite!(c_listeners).remove(&c_addr);
             res
         };
         tracker.spawn_on(task, &zenoh_runtime::ZRuntime::TX);
@@ -452,7 +452,7 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastQuic {
         let addr = get_quic_addr(&epaddr).await?;
 
         // Stop the listener
-        let listener = zwrite!(self.listeners).remove(&addr).ok_or_else(|| {
+        let listener = zasyncwrite!(self.listeners).remove(&addr).ok_or_else(|| {
             let e = zerror!(
                 "Can not delete the QUIC listener because it has not been found: {}",
                 addr
@@ -466,17 +466,17 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastQuic {
         Ok(())
     }
 
-    fn get_listeners(&self) -> Vec<EndPoint> {
-        zread!(self.listeners)
+    async fn get_listeners(&self) -> Vec<EndPoint> {
+        zasyncread!(self.listeners)
             .values()
             .map(|x| x.endpoint.clone())
             .collect()
     }
 
-    fn get_locators(&self) -> Vec<Locator> {
+    async fn get_locators(&self) -> Vec<Locator> {
         let mut locators = vec![];
 
-        let guard = zread!(self.listeners);
+        let guard = zasyncread!(self.listeners);
         for (key, value) in guard.iter() {
             let (kip, kpt) = (key.ip(), key.port());
 

@@ -19,11 +19,12 @@ use std::fmt;
 use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::RwLock as AsyncRwLock;
 use tokio::task::JoinHandle;
-use zenoh_core::{zread, zwrite};
+use zenoh_core::{zasyncread, zasyncwrite};
 use zenoh_link_commons::{
     LinkManagerUnicastTrait, LinkUnicast, LinkUnicastTrait, NewLinkChannelSender,
 };
@@ -219,14 +220,14 @@ impl ListenerUnicastTcp {
 
 pub struct LinkManagerUnicastTcp {
     manager: NewLinkChannelSender,
-    listeners: Arc<RwLock<HashMap<SocketAddr, ListenerUnicastTcp>>>,
+    listeners: Arc<AsyncRwLock<HashMap<SocketAddr, ListenerUnicastTcp>>>,
 }
 
 impl LinkManagerUnicastTcp {
     pub fn new(manager: NewLinkChannelSender) -> Self {
         Self {
             manager,
-            listeners: Arc::new(RwLock::new(HashMap::new())),
+            listeners: Arc::new(AsyncRwLock::new(HashMap::new())),
         }
     }
 }
@@ -312,7 +313,7 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastTcp {
                     // Spawn the accept loop for the listener
                     let active = Arc::new(AtomicBool::new(true));
                     let signal = Signal::new();
-                    let mut listeners = zwrite!(self.listeners);
+                    let mut listeners = zasyncwrite!(self.listeners);
 
                     let c_active = active.clone();
                     let c_signal = signal.clone();
@@ -322,7 +323,7 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastTcp {
                     let handle = zenoh_runtime::ZRuntime::Accept.spawn(async move {
                         // Wait for the accept loop to terminate
                         let res = accept_task(socket, c_active, c_signal, c_manager).await;
-                        zwrite!(c_listeners).remove(&c_addr);
+                        zasyncwrite!(c_listeners).remove(&c_addr);
                         res
                     });
 
@@ -357,7 +358,7 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastTcp {
         let mut errs: Vec<ZError> = vec![];
         let mut listener = None;
         for a in addrs {
-            match zwrite!(self.listeners).remove(&a) {
+            match zasyncwrite!(self.listeners).remove(&a) {
                 Some(l) => {
                     // We cannot keep a sync guard across a .await
                     // Break the loop and assign the listener.
@@ -387,17 +388,17 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastTcp {
         }
     }
 
-    fn get_listeners(&self) -> Vec<EndPoint> {
-        zread!(self.listeners)
+    async fn get_listeners(&self) -> Vec<EndPoint> {
+        zasyncread!(self.listeners)
             .values()
             .map(|l| l.endpoint.clone())
             .collect()
     }
 
-    fn get_locators(&self) -> Vec<Locator> {
+    async fn get_locators(&self) -> Vec<Locator> {
         let mut locators = vec![];
 
-        let guard = zread!(self.listeners);
+        let guard = zasyncread!(self.listeners);
         for (key, value) in guard.iter() {
             let (kip, kpt) = (key.ip(), key.port());
 

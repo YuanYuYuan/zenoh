@@ -137,7 +137,7 @@ async fn openclose_transport(endpoint: &EndPoint, lowlatency_transport: bool) {
     println!("Transport Open Close [1a1]: {res:?}");
     assert!(res.is_ok());
     println!("Transport Open Close [1a2]");
-    let locators = router_manager.get_listeners();
+    let locators = router_manager.get_listeners().await;
     println!("Transport Open Close [1a2]: {locators:?}");
     assert_eq!(locators.len(), 1);
 
@@ -433,7 +433,7 @@ async fn openclose_transport(endpoint: &EndPoint, lowlatency_transport: bool) {
     assert!(res.is_ok());
 
     ztimeout!(async {
-        while !router_manager.get_listeners().is_empty() {
+        while !router_manager.get_listeners().await.is_empty() {
             tokio::time::sleep(SLEEP).await;
         }
     });
