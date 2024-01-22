@@ -374,7 +374,8 @@ impl Session {
     ///
     /// # Examples
     /// ```no_run
-    /// # async_std::task::block_on(async {
+    /// # #[tokio::main]
+    /// # async fn main() {
     /// use zenoh::prelude::r#async::*;
     ///
     /// let session = zenoh::open(config::peer()).res().await.unwrap().into_arc();
@@ -382,12 +383,12 @@ impl Session {
     ///     .res()
     ///     .await
     ///     .unwrap();
-    /// async_std::task::spawn(async move {
+    /// tokio::task::spawn(async move {
     ///     while let Ok(sample) = subscriber.recv_async().await {
     ///         println!("Received: {:?}", sample);
     ///     }
     /// }).await;
-    /// # })
+    /// # }
     /// ```
     pub fn into_arc(self) -> Arc<Self> {
         Arc::new(self)
@@ -407,18 +408,19 @@ impl Session {
     ///
     /// # Examples
     /// ```no_run
-    /// # async_std::task::block_on(async {
+    /// # #[tokio::main]
+    /// # async fn main() {
     /// use zenoh::prelude::r#async::*;
     /// use zenoh::Session;
     ///
     /// let session = Session::leak(zenoh::open(config::peer()).res().await.unwrap());
     /// let subscriber = session.declare_subscriber("key/expression").res().await.unwrap();
-    /// async_std::task::spawn(async move {
+    /// tokio::task::spawn(async move {
     ///     while let Ok(sample) = subscriber.recv_async().await {
     ///         println!("Received: {:?}", sample);
     ///     }
     /// }).await;
-    /// # })
+    /// # }
     /// ```
     pub fn leak(s: Self) -> &'static mut Self {
         Box::leak(Box::new(s))
@@ -441,12 +443,13 @@ impl Session {
     ///
     /// # Examples
     /// ```
-    /// # async_std::task::block_on(async {
+    /// # #[tokio::main]
+    /// # async fn main() {
     /// use zenoh::prelude::r#async::*;
     ///
     /// let session = zenoh::open(config::peer()).res().await.unwrap();
     /// session.close().res().await.unwrap();
-    /// # })
+    /// # }
     /// ```
     pub fn close(self) -> impl Resolve<ZResult<()>> {
         ResolveFuture::new(async move {
@@ -478,22 +481,24 @@ impl Session {
     /// # Examples
     /// ### Read current zenoh configuration
     /// ```
-    /// # async_std::task::block_on(async {
+    /// # #[tokio::main]
+    /// # async fn main() {
     /// use zenoh::prelude::r#async::*;
     ///
     /// let session = zenoh::open(config::peer()).res().await.unwrap();
     /// let peers = session.config().get("connect/endpoints").unwrap();
-    /// # })
+    /// # }
     /// ```
     ///
     /// ### Modify current zenoh configuration
     /// ```
-    /// # async_std::task::block_on(async {
+    /// # #[tokio::main]
+    /// # async fn main() {
     /// use zenoh::prelude::r#async::*;
     ///
     /// let session = zenoh::open(config::peer()).res().await.unwrap();
     /// let _ = session.config().insert_json5("connect/endpoints", r#"["tcp/127.0.0.1/7447"]"#);
-    /// # })
+    /// # }
     /// ```
     pub fn config(&self) -> &Notifier<Config> {
         &self.runtime.config
@@ -503,12 +508,13 @@ impl Session {
     ///
     /// # Examples
     /// ```
-    /// # async_std::task::block_on(async {
+    /// # #[tokio::main]
+    /// # async fn main() {
     /// use zenoh::prelude::r#async::*;
     ///
     /// let session = zenoh::open(config::peer()).res().await.unwrap();
     /// let info = session.info();
-    /// # })
+    /// # }
     /// ```
     pub fn info(&self) -> SessionInfo {
         SessionInfo {
@@ -524,7 +530,8 @@ impl Session {
     ///
     /// # Examples
     /// ```no_run
-    /// # async_std::task::block_on(async {
+    /// # #[tokio::main]
+    /// # async fn main() {
     /// use zenoh::prelude::r#async::*;
     ///
     /// let session = zenoh::open(config::peer()).res().await.unwrap();
@@ -532,7 +539,7 @@ impl Session {
     /// while let Ok(sample) = subscriber.recv_async().await {
     ///     println!("Received: {:?}", sample);
     /// }
-    /// # })
+    /// # }
     /// ```
     pub fn declare_subscriber<'a, 'b, TryIntoKeyExpr>(
         &'a self,
@@ -561,7 +568,8 @@ impl Session {
     ///
     /// # Examples
     /// ```no_run
-    /// # async_std::task::block_on(async {
+    /// # #[tokio::main]
+    /// # async fn main() {
     /// use zenoh::prelude::r#async::*;
     ///
     /// let session = zenoh::open(config::peer()).res().await.unwrap();
@@ -572,7 +580,7 @@ impl Session {
     ///         "value",
     ///     ).unwrap())).res().await.unwrap();
     /// }
-    /// # })
+    /// # }
     /// ```
     pub fn declare_queryable<'a, 'b, TryIntoKeyExpr>(
         &'a self,
@@ -599,7 +607,8 @@ impl Session {
     ///
     /// # Examples
     /// ```
-    /// # async_std::task::block_on(async {
+    /// # #[tokio::main]
+    /// # async fn main() {
     /// use zenoh::prelude::r#async::*;
     ///
     /// let session = zenoh::open(config::peer()).res().await.unwrap();
@@ -608,7 +617,7 @@ impl Session {
     ///     .await
     ///     .unwrap();
     /// publisher.put("value").res().await.unwrap();
-    /// # })
+    /// # }
     /// ```
     pub fn declare_publisher<'a, 'b, TryIntoKeyExpr>(
         &'a self,
@@ -634,12 +643,13 @@ impl Session {
     ///
     /// # Examples
     /// ```
-    /// # async_std::task::block_on(async {
+    /// # #[tokio::main]
+    /// # async fn main() {
     /// use zenoh::prelude::r#async::*;
     ///
     /// let session = zenoh::open(config::peer()).res().await.unwrap();
     /// let key_expr = session.declare_keyexpr("key/expression").res().await.unwrap();
-    /// # })
+    /// # }
     /// ```
     pub fn declare_keyexpr<'a, 'b: 'a, TryIntoKeyExpr>(
         &'a self,
@@ -695,7 +705,8 @@ impl Session {
     ///
     /// # Examples
     /// ```
-    /// # async_std::task::block_on(async {
+    /// # #[tokio::main]
+    /// # async fn main() {
     /// use zenoh::prelude::r#async::*;
     ///
     /// let session = zenoh::open(config::peer()).res().await.unwrap();
@@ -705,7 +716,7 @@ impl Session {
     ///     .res()
     ///     .await
     ///     .unwrap();
-    /// # })
+    /// # }
     /// ```
     #[inline]
     pub fn put<'a, 'b: 'a, TryIntoKeyExpr, IntoValue>(
@@ -735,12 +746,13 @@ impl Session {
     ///
     /// # Examples
     /// ```
-    /// # async_std::task::block_on(async {
+    /// # #[tokio::main]
+    /// # async fn main() {
     /// use zenoh::prelude::r#async::*;
     ///
     /// let session = zenoh::open(config::peer()).res().await.unwrap();
     /// session.delete("key/expression").res().await.unwrap();
-    /// # })
+    /// # }
     /// ```
     #[inline]
     pub fn delete<'a, 'b: 'a, TryIntoKeyExpr>(
@@ -770,7 +782,8 @@ impl Session {
     ///
     /// # Examples
     /// ```
-    /// # async_std::task::block_on(async {
+    /// # #[tokio::main]
+    /// # async fn main() {
     /// use zenoh::prelude::r#async::*;
     ///
     /// let session = zenoh::open(config::peer()).res().await.unwrap();
@@ -778,7 +791,7 @@ impl Session {
     /// while let Ok(reply) = replies.recv_async().await {
     ///     println!(">> Received {:?}", reply.sample);
     /// }
-    /// # })
+    /// # }
     /// ```
     pub fn get<'a, 'b: 'a, IntoSelector>(
         &'a self,
@@ -809,7 +822,8 @@ impl Session {
     ///
     /// # Examples
     /// ```
-    /// # async_std::task::block_on(async {
+    /// # #[tokio::main]
+    /// # async fn main() {
     /// use zenoh::prelude::r#async::*;
     ///
     /// let session = zenoh::open(config::peer()).res().await.unwrap();
@@ -819,7 +833,7 @@ impl Session {
     ///     .res()
     ///     .await
     ///     .unwrap();
-    /// # })
+    /// # }
     /// ```
     #[zenoh_macros::unstable]
     pub fn liveliness(&self) -> Liveliness {
@@ -1978,7 +1992,8 @@ impl SessionDeclarations for Arc<Session> {
     ///
     /// # Examples
     /// ```no_run
-    /// # async_std::task::block_on(async {
+    /// # #[tokio::main]
+    /// # async fn main() {
     /// use zenoh::prelude::r#async::*;
     ///
     /// let session = zenoh::open(config::peer()).res().await.unwrap().into_arc();
@@ -1986,12 +2001,12 @@ impl SessionDeclarations for Arc<Session> {
     ///     .res()
     ///     .await
     ///     .unwrap();
-    /// async_std::task::spawn(async move {
+    /// tokio::task::spawn(async move {
     ///     while let Ok(sample) = subscriber.recv_async().await {
     ///         println!("Received: {:?}", sample);
     ///     }
     /// }).await;
-    /// # })
+    /// # }
     /// ```
     fn declare_subscriber<'b, TryIntoKeyExpr>(
         &self,
@@ -2020,7 +2035,8 @@ impl SessionDeclarations for Arc<Session> {
     ///
     /// # Examples
     /// ```no_run
-    /// # async_std::task::block_on(async {
+    /// # #[tokio::main]
+    /// # async fn main() {
     /// use zenoh::prelude::r#async::*;
     ///
     /// let session = zenoh::open(config::peer()).res().await.unwrap().into_arc();
@@ -2028,7 +2044,7 @@ impl SessionDeclarations for Arc<Session> {
     ///     .res()
     ///     .await
     ///     .unwrap();
-    /// async_std::task::spawn(async move {
+    /// tokio::task::spawn(async move {
     ///     while let Ok(query) = queryable.recv_async().await {
     ///         query.reply(Ok(Sample::try_from(
     ///             "key/expression",
@@ -2036,7 +2052,7 @@ impl SessionDeclarations for Arc<Session> {
     ///         ).unwrap())).res().await.unwrap();
     ///     }
     /// }).await;
-    /// # })
+    /// # }
     /// ```
     fn declare_queryable<'b, TryIntoKeyExpr>(
         &self,
@@ -2063,7 +2079,8 @@ impl SessionDeclarations for Arc<Session> {
     ///
     /// # Examples
     /// ```
-    /// # async_std::task::block_on(async {
+    /// # #[tokio::main]
+    /// # async fn main() {
     /// use zenoh::prelude::r#async::*;
     ///
     /// let session = zenoh::open(config::peer()).res().await.unwrap().into_arc();
@@ -2072,7 +2089,7 @@ impl SessionDeclarations for Arc<Session> {
     ///     .await
     ///     .unwrap();
     /// publisher.put("value").res().await.unwrap();
-    /// # })
+    /// # }
     /// ```
     fn declare_publisher<'b, TryIntoKeyExpr>(
         &self,
@@ -2095,7 +2112,8 @@ impl SessionDeclarations for Arc<Session> {
     ///
     /// # Examples
     /// ```
-    /// # async_std::task::block_on(async {
+    /// # #[tokio::main]
+    /// # async fn main() {
     /// use zenoh::prelude::r#async::*;
     ///
     /// let session = zenoh::open(config::peer()).res().await.unwrap().into_arc();
@@ -2105,7 +2123,7 @@ impl SessionDeclarations for Arc<Session> {
     ///     .res()
     ///     .await
     ///     .unwrap();
-    /// # })
+    /// # }
     /// ```
     #[zenoh_macros::unstable]
     fn liveliness(&self) -> Liveliness<'static> {
@@ -2543,7 +2561,8 @@ impl fmt::Debug for Session {
 ///
 /// # Examples
 /// ```no_run
-/// # async_std::task::block_on(async {
+/// # #[tokio::main]
+/// # async fn main() {
 /// use zenoh::prelude::r#async::*;
 ///
 /// let session = zenoh::open(config::peer()).res().await.unwrap().into_arc();
@@ -2551,12 +2570,12 @@ impl fmt::Debug for Session {
 ///     .res()
 ///     .await
 ///     .unwrap();
-/// async_std::task::spawn(async move {
+/// tokio::task::spawn(async move {
 ///     while let Ok(sample) = subscriber.recv_async().await {
 ///         println!("Received: {:?}", sample);
 ///     }
 /// }).await;
-/// # })
+/// # }
 /// ```
 pub trait SessionDeclarations {
     /// Create a [`Subscriber`](crate::subscriber::Subscriber) for the given key expression.
@@ -2567,7 +2586,8 @@ pub trait SessionDeclarations {
     ///
     /// # Examples
     /// ```no_run
-    /// # async_std::task::block_on(async {
+    /// # #[tokio::main]
+    /// # async fn main() {
     /// use zenoh::prelude::r#async::*;
     ///
     /// let session = zenoh::open(config::peer()).res().await.unwrap().into_arc();
@@ -2575,12 +2595,12 @@ pub trait SessionDeclarations {
     ///     .res()
     ///     .await
     ///     .unwrap();
-    /// async_std::task::spawn(async move {
+    /// tokio::task::spawn(async move {
     ///     while let Ok(sample) = subscriber.recv_async().await {
     ///         println!("Received: {:?}", sample);
     ///     }
     /// }).await;
-    /// # })
+    /// # }
     /// ```
     fn declare_subscriber<'a, TryIntoKeyExpr>(
         &self,
@@ -2599,7 +2619,8 @@ pub trait SessionDeclarations {
     ///
     /// # Examples
     /// ```no_run
-    /// # async_std::task::block_on(async {
+    /// # #[tokio::main]
+    /// # async fn main() {
     /// use zenoh::prelude::r#async::*;
     ///
     /// let session = zenoh::open(config::peer()).res().await.unwrap().into_arc();
@@ -2607,7 +2628,7 @@ pub trait SessionDeclarations {
     ///     .res()
     ///     .await
     ///     .unwrap();
-    /// async_std::task::spawn(async move {
+    /// tokio::task::spawn(async move {
     ///     while let Ok(query) = queryable.recv_async().await {
     ///         query.reply(Ok(Sample::try_from(
     ///             "key/expression",
@@ -2615,7 +2636,7 @@ pub trait SessionDeclarations {
     ///         ).unwrap())).res().await.unwrap();
     ///     }
     /// }).await;
-    /// # })
+    /// # }
     /// ```
     fn declare_queryable<'a, TryIntoKeyExpr>(
         &self,
@@ -2633,7 +2654,8 @@ pub trait SessionDeclarations {
     ///
     /// # Examples
     /// ```
-    /// # async_std::task::block_on(async {
+    /// # #[tokio::main]
+    /// # async fn main() {
     /// use zenoh::prelude::r#async::*;
     ///
     /// let session = zenoh::open(config::peer()).res().await.unwrap().into_arc();
@@ -2642,7 +2664,7 @@ pub trait SessionDeclarations {
     ///     .await
     ///     .unwrap();
     /// publisher.put("value").res().await.unwrap();
-    /// # })
+    /// # }
     /// ```
     fn declare_publisher<'a, TryIntoKeyExpr>(
         &self,
@@ -2656,7 +2678,8 @@ pub trait SessionDeclarations {
     ///
     /// # Examples
     /// ```
-    /// # async_std::task::block_on(async {
+    /// # #[tokio::main]
+    /// # async fn main() {
     /// use zenoh::prelude::r#async::*;
     ///
     /// let session = zenoh::open(config::peer()).res().await.unwrap().into_arc();
@@ -2666,7 +2689,7 @@ pub trait SessionDeclarations {
     ///     .res()
     ///     .await
     ///     .unwrap();
-    /// # })
+    /// # }
     /// ```
     #[zenoh_macros::unstable]
     fn liveliness(&self) -> Liveliness<'static>;
