@@ -200,8 +200,8 @@ impl Drop for LinkUnicastTls {
     fn drop(&mut self) {
         // Close the underlying TCP stream
         let (tcp_stream, _) = self.get_sock_mut().get_mut();
-        let _ =
-            zenoh_runtime::ZRuntime::TX.block_in_place(async move { tcp_stream.shutdown().await });
+        let _ = zenoh_runtime::ZRuntime::Transport
+            .block_in_place(async move { tcp_stream.shutdown().await });
     }
 }
 
@@ -362,7 +362,7 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastTls {
             zasyncwrite!(c_listeners).remove(&c_addr);
             res
         };
-        tracker.spawn_on(task, &zenoh_runtime::ZRuntime::TX);
+        tracker.spawn_on(task, &zenoh_runtime::ZRuntime::Reception);
 
         // Update the endpoint locator address
         let locator = Locator::new(
@@ -520,20 +520,20 @@ impl TlsServerConfig {
 
         let mut keys: Vec<PrivateKeyDer> =
             rustls_pemfile::rsa_private_keys(&mut Cursor::new(&tls_server_private_key))
-                .map(|x| x.map(|key| PrivateKeyDer::from(key)))
+                .map(|x| x.map(PrivateKeyDer::from))
                 .collect::<Result<_, _>>()
                 .map_err(|err| zerror!("Error processing server key: {err}."))?;
 
         if keys.is_empty() {
             keys = rustls_pemfile::pkcs8_private_keys(&mut Cursor::new(&tls_server_private_key))
-                .map(|x| x.map(|key| PrivateKeyDer::from(key)))
+                .map(|x| x.map(PrivateKeyDer::from))
                 .collect::<Result<_, _>>()
                 .map_err(|err| zerror!("Error processing server key: {err}."))?;
         }
 
         if keys.is_empty() {
             keys = rustls_pemfile::ec_private_keys(&mut Cursor::new(&tls_server_private_key))
-                .map(|x| x.map(|key| PrivateKeyDer::from(key)))
+                .map(|x| x.map(PrivateKeyDer::from))
                 .collect::<Result<_, _>>()
                 .map_err(|err| zerror!("Error processing server key: {err}."))?;
         }
@@ -615,7 +615,7 @@ impl TlsClientConfig {
         // Allows mixed user-generated CA and webPKI CA
         log::debug!("Loading default Web PKI certificates.");
         let mut root_cert_store = RootCertStore {
-            roots: webpki_roots::TLS_SERVER_ROOTS.iter().cloned().collect(),
+            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
         };
 
         if let Some(custom_root_cert) = load_trust_anchors(config)? {
@@ -635,21 +635,21 @@ impl TlsClientConfig {
 
             let mut keys: Vec<PrivateKeyDer> =
                 rustls_pemfile::rsa_private_keys(&mut Cursor::new(&tls_client_private_key))
-                    .map(|x| x.map(|key| PrivateKeyDer::from(key)))
+                    .map(|x| x.map(PrivateKeyDer::from))
                     .collect::<Result<_, _>>()
                     .map_err(|err| zerror!("Error processing client key: {err}."))?;
 
             if keys.is_empty() {
                 keys =
                     rustls_pemfile::pkcs8_private_keys(&mut Cursor::new(&tls_client_private_key))
-                        .map(|x| x.map(|key| PrivateKeyDer::from(key)))
+                        .map(|x| x.map(PrivateKeyDer::from))
                         .collect::<Result<_, _>>()
                         .map_err(|err| zerror!("Error processing client key: {err}."))?;
             }
 
             if keys.is_empty() {
                 keys = rustls_pemfile::ec_private_keys(&mut Cursor::new(&tls_client_private_key))
-                    .map(|x| x.map(|key| PrivateKeyDer::from(key)))
+                    .map(|x| x.map(PrivateKeyDer::from))
                     .collect::<Result<_, _>>()
                     .map_err(|err| zerror!("Error processing client key: {err}."))?;
             }
