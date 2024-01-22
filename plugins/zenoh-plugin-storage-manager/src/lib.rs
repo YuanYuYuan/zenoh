@@ -19,7 +19,6 @@
 //! [Click here for Zenoh's documentation](../zenoh/index.html)
 #![recursion_limit = "512"]
 
-use async_std::task;
 use flume::Sender;
 use libloading::Library;
 use memory_backend::create_memory_backend;
@@ -143,7 +142,7 @@ impl StorageRuntimeInner {
     }
     fn kill_volume(&mut self, volume: VolumeConfig) {
         if let Some(storages) = self.storages.remove(&volume.name) {
-            async_std::task::block_on(futures::future::join_all(
+            zenoh_runtime::ZRuntime::Application.block_in_place(futures::future::join_all(
                 storages
                     .into_values()
                     .map(|s| async move { s.send(StorageMessage::Stop) }),
@@ -258,14 +257,15 @@ impl StorageRuntimeInner {
             let storage_name = storage.name.clone();
             let in_interceptor = backend.backend.incoming_data_interceptor();
             let out_interceptor = backend.backend.outgoing_data_interceptor();
-            let stopper = async_std::task::block_on(create_and_start_storage(
-                admin_key,
-                storage,
-                &mut backend.backend,
-                in_interceptor,
-                out_interceptor,
-                self.session.clone(),
-            ))?;
+            let stopper =
+                zenoh_runtime::ZRuntime::Application.block_in_place(create_and_start_storage(
+                    admin_key,
+                    storage,
+                    &mut backend.backend,
+                    in_interceptor,
+                    out_interceptor,
+                    self.session.clone(),
+                ))?;
             self.storages
                 .entry(volume_id)
                 .or_default()
@@ -376,11 +376,13 @@ impl RunningPluginTrait for StorageRuntime {
                             .unwrap()
                             .intersects(&selector.key_expr)
                         {
-                            if let Ok(value) = task::block_on(async {
-                                let (tx, rx) = async_std::channel::bounded(1);
-                                let _ = handle.send(StorageMessage::GetStatus(tx));
-                                rx.recv().await
-                            }) {
+                            if let Ok(value) =
+                                zenoh_runtime::ZRuntime::Application.block_in_place(async {
+                                    let (tx, rx) = flume::bounded(1);
+                                    let _ = handle.send(StorageMessage::GetStatus(tx));
+                                    rx.recv_async().await
+                                })
+                            {
                                 responses.push(zenoh::plugins::Response::new(key.clone(), value))
                             }
                         }
