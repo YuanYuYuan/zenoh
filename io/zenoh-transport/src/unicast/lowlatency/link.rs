@@ -94,7 +94,7 @@ pub(crate) async fn read_with_link(
 
 impl TransportUnicastLowlatency {
     pub(super) fn send(&self, msg: TransportMessageLowLatency) -> ZResult<()> {
-        zenoh_runtime::ZRuntime::TX.block_in_place(self.send_async(msg))
+        zenoh_runtime::ZRuntime::Transport.block_in_place(self.send_async(msg))
     }
 
     pub(super) async fn send_async(&self, msg: TransportMessageLowLatency) -> ZResult<()> {
@@ -135,7 +135,7 @@ impl TransportUnicastLowlatency {
                 let _ = c_transport.finalize(0).await;
             }
         };
-        self.tracker.spawn_on(task, &ZRuntime::TX);
+        self.tracker.spawn_on(task, &ZRuntime::Transport);
     }
 
     pub(super) fn internal_start_rx(&self, lease: Duration) {
@@ -191,6 +191,7 @@ impl TransportUnicastLowlatency {
                     }
                 }
             };
+
             log::debug!(
                 "[{}] Rx task finished with result {:?}",
                 c_transport.manager.config.zid,
@@ -207,7 +208,7 @@ impl TransportUnicastLowlatency {
             ZResult::Ok(())
         };
 
-        self.tracker.spawn_on(task, &ZRuntime::RX);
+        self.tracker.spawn_on(task, &ZRuntime::Transport);
     }
 }
 
@@ -220,7 +221,9 @@ async fn keepalive_task(
     token: CancellationToken,
     #[cfg(feature = "stats")] stats: Arc<TransportStats>,
 ) -> ZResult<()> {
-    let mut interval = tokio::time::interval(keep_alive);
+    // TODO: check this necessity
+    let mut interval =
+        tokio::time::interval_at(tokio::time::Instant::now() + keep_alive, keep_alive);
 
     loop {
         tokio::select! {
