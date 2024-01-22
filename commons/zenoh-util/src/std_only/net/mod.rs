@@ -11,9 +11,7 @@
 // Contributors:
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
-use async_std::net::TcpStream;
 use std::net::{IpAddr, Ipv6Addr};
-use std::time::Duration;
 use zenoh_core::zconfigurable;
 #[cfg(unix)]
 use zenoh_result::zerror;
@@ -22,73 +20,6 @@ use zenoh_result::{bail, ZResult};
 zconfigurable! {
     static ref WINDOWS_GET_ADAPTERS_ADDRESSES_BUF_SIZE: u32 = 8192;
     static ref WINDOWS_GET_ADAPTERS_ADDRESSES_MAX_RETRIES: u32 = 3;
-}
-
-pub fn set_linger(socket: &TcpStream, dur: Option<Duration>) -> ZResult<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::io::AsRawFd;
-
-        let raw_socket = socket.as_raw_fd();
-        let linger = match dur {
-            Some(d) => libc::linger {
-                l_onoff: 1,
-                l_linger: d.as_secs() as libc::c_int,
-            },
-            None => libc::linger {
-                l_onoff: 0,
-                l_linger: 0,
-            },
-        };
-
-        // Set the SO_LINGER option
-        unsafe {
-            let ret = libc::setsockopt(
-                raw_socket,
-                libc::SOL_SOCKET,
-                libc::SO_LINGER,
-                &linger as *const libc::linger as *const libc::c_void,
-                std::mem::size_of_val(&linger) as libc::socklen_t,
-            );
-            match ret {
-                0 => Ok(()),
-                err_code => bail!("setsockopt returned {}", err_code),
-            }
-        }
-    }
-
-    #[cfg(windows)]
-    {
-        use std::os::windows::io::AsRawSocket;
-        use winapi::um::winsock2;
-        use winapi::um::ws2tcpip;
-
-        let raw_socket = socket.as_raw_socket();
-        let linger = match dur {
-            Some(d) => winsock2::linger {
-                l_onoff: 1,
-                l_linger: d.as_secs() as u16,
-            },
-            None => winsock2::linger {
-                l_onoff: 0,
-                l_linger: 0,
-            },
-        };
-
-        unsafe {
-            let ret = winsock2::setsockopt(
-                raw_socket.try_into().unwrap(),
-                winsock2::SOL_SOCKET,
-                winsock2::SO_LINGER,
-                &linger as *const winsock2::linger as *const i8,
-                std::mem::size_of_val(&linger) as ws2tcpip::socklen_t,
-            );
-            match ret {
-                0 => Ok(()),
-                err_code => bail!("setsockopt returned {}", err_code),
-            }
-        }
-    }
 }
 
 pub fn get_interface(name: &str) -> ZResult<Option<IpAddr>> {
