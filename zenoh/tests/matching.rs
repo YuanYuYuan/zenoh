@@ -20,12 +20,6 @@ use zenoh_result::ZResult as Result;
 const TIMEOUT: Duration = Duration::from_secs(60);
 const RECV_TIMEOUT: Duration = Duration::from_secs(1);
 
-macro_rules! ztimeout {
-    ($f:expr) => {
-        $f.timeout(TIMEOUT).await.unwrap()
-    };
-}
-
 #[cfg(feature = "unstable")]
 async fn create_session_pair(locator: &str) -> (Session, Session) {
     let config1 = {
