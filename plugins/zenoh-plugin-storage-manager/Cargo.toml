@@ -32,9 +32,7 @@ name = "zenoh_plugin_storage_manager"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-tokio = { workspace = true, features = ["time", "rt-multi-thread", "macros"] }
-tokio-util = { workspace = true }
-zenoh-runtime = { workspace = true }
+async-std = { workspace = true, features = ["default"] }
 async-trait = { workspace = true }
 clap = { workspace = true }
 crc = { workspace = true }
