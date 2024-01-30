@@ -338,7 +338,7 @@ impl Session {
         aggregated_publishers: Vec<OwnedKeyExpr>,
     ) -> impl Resolve<Session> {
         ResolveClosure::new(move || {
-            let router = runtime.router.clone();
+            let router = runtime.router();
             let state = Arc::new(RwLock::new(SessionState::new(
                 aggregated_subscribers,
                 aggregated_publishers,
@@ -433,7 +433,7 @@ impl Session {
     }
 
     pub fn hlc(&self) -> Option<&HLC> {
-        self.runtime.hlc.as_ref().map(Arc::as_ref)
+        self.runtime.hlc()
     }
 
     /// Close the zenoh [`Session`](Session).
@@ -501,7 +501,7 @@ impl Session {
     /// # }
     /// ```
     pub fn config(&self) -> &Notifier<Config> {
-        &self.runtime.config
+        self.runtime.config()
     }
 
     /// Get informations about the zenoh [`Session`](Session).
@@ -802,7 +802,10 @@ impl Session {
         <IntoSelector as TryInto<Selector<'b>>>::Error: Into<zenoh_result::Error>,
     {
         let selector = selector.try_into().map_err(Into::into);
-        let conf = self.runtime.config.lock();
+        let timeout = {
+            let conf = self.runtime.config().lock();
+            Duration::from_millis(unwrap_or_default!(conf.queries_default_timeout()))
+        };
         GetBuilder {
             session: self,
             selector,
@@ -810,7 +813,7 @@ impl Session {
             target: QueryTarget::default(),
             consolidation: QueryConsolidation::default(),
             destination: Locality::default(),
-            timeout: Duration::from_millis(unwrap_or_default!(conf.queries_default_timeout())),
+            timeout,
             value: None,
             #[cfg(feature = "unstable")]
             attachment: None,
@@ -1510,7 +1513,8 @@ impl Session {
     ) -> ZResult<MatchingStatus> {
         use crate::net::routing::router::RoutingExpr;
         use zenoh_protocol::core::WhatAmI;
-        let tables = zread!(self.runtime.router.tables.tables);
+        let router = self.runtime.router();
+        let tables = zread!(router.tables.tables);
         let res = crate::net::routing::resource::Resource::get_resource(
             &tables.root_res,
             key_expr.as_str(),
@@ -1807,7 +1811,7 @@ impl Session {
         // TODO: check which ZRuntime should be used
         zenoh_runtime::ZRuntime::Net.spawn({
             let state = self.state.clone();
-            let zid = self.runtime.zid;
+            let zid = self.runtime.zid();
             async move {
                 tokio::time::sleep(timeout).await;
                 let mut state = zwrite!(state);
@@ -1960,7 +1964,7 @@ impl Session {
 
         let parameters = parameters.to_owned();
 
-        let zid = self.runtime.zid; // @TODO build/use prebuilt specific zid
+        let zid = self.runtime.zid(); // @TODO build/use prebuilt specific zid
 
         let query = Query {
             inner: Arc::new(QueryInner {
