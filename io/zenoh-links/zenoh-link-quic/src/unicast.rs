@@ -435,7 +435,7 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastQuic {
             zasyncwrite!(c_listeners).remove(&c_addr);
             res
         };
-        tracker.spawn_on(task, &zenoh_runtime::ZRuntime::TX);
+        tracker.spawn_on(task, &zenoh_runtime::ZRuntime::Reception);
 
         // Initialize the QuicAcceptor
         let locator = endpoint.to_locator();
