@@ -18,19 +18,17 @@ use std::convert::TryInto;
 use std::fmt;
 use std::net::IpAddr;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::RwLock as AsyncRwLock;
-use tokio::task::JoinHandle;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use zenoh_core::{zasyncread, zasyncwrite};
 use zenoh_link_commons::{
     LinkManagerUnicastTrait, LinkUnicast, LinkUnicastTrait, NewLinkChannelSender,
 };
 use zenoh_protocol::core::{EndPoint, Locator};
 use zenoh_result::{bail, zerror, Error as ZError, ZResult};
-use zenoh_sync::Signal;
 
 use super::{
     get_tcp_addrs, TCP_ACCEPT_THROTTLE_TIME, TCP_DEFAULT_MTU, TCP_LINGER_TIMEOUT,
@@ -198,24 +196,27 @@ impl fmt::Debug for LinkUnicastTcp {
 /*************************************/
 struct ListenerUnicastTcp {
     endpoint: EndPoint,
-    active: Arc<AtomicBool>,
-    signal: Signal,
-    handle: JoinHandle<ZResult<()>>,
+    token: CancellationToken,
+    tracker: TaskTracker,
 }
 
 impl ListenerUnicastTcp {
     fn new(
         endpoint: EndPoint,
-        active: Arc<AtomicBool>,
-        signal: Signal,
-        handle: JoinHandle<ZResult<()>>,
+        token: CancellationToken,
+        tracker: TaskTracker,
     ) -> ListenerUnicastTcp {
         ListenerUnicastTcp {
             endpoint,
-            active,
-            signal,
-            handle,
+            token,
+            tracker,
         }
+    }
+
+    async fn stop(&self) {
+        self.token.cancel();
+        self.tracker.close();
+        self.tracker.wait().await;
     }
 }
 
@@ -312,24 +313,25 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastTcp {
                     )?;
 
                     // Spawn the accept loop for the listener
-                    let active = Arc::new(AtomicBool::new(true));
-                    let signal = Signal::new();
+                    let token = CancellationToken::new();
+                    let c_token = token.clone();
                     let mut listeners = zasyncwrite!(self.listeners);
 
-                    let c_active = active.clone();
-                    let c_signal = signal.clone();
                     let c_manager = self.manager.clone();
                     let c_listeners = self.listeners.clone();
                     let c_addr = local_addr;
-                    let handle = zenoh_runtime::ZRuntime::Reception.spawn(async move {
+
+                    let tracker = TaskTracker::new();
+                    let task = async move {
                         // Wait for the accept loop to terminate
-                        let res = accept_task(socket, c_active, c_signal, c_manager).await;
+                        let res = accept_task(socket, c_token, c_manager).await;
                         zasyncwrite!(c_listeners).remove(&c_addr);
                         res
-                    });
+                    };
+                    tracker.spawn_on(task, &zenoh_runtime::ZRuntime::Reception);
 
                     let locator = endpoint.to_locator();
-                    let listener = ListenerUnicastTcp::new(endpoint, active, signal, handle);
+                    let listener = ListenerUnicastTcp::new(endpoint, token, tracker);
                     // Update the list of active listeners on the manager
                     listeners.insert(local_addr, listener);
 
@@ -375,9 +377,7 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastTcp {
         match listener {
             Some(l) => {
                 // Send the stop signal
-                l.active.store(false, Ordering::Release);
-                l.signal.trigger();
-                l.handle.await?
+                l.stop().await;
             }
             None => {
                 bail!(
@@ -387,6 +387,7 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastTcp {
                 )
             }
         }
+        Ok(())
     }
 
     async fn get_listeners(&self) -> Vec<EndPoint> {
@@ -429,8 +430,7 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastTcp {
 
 async fn accept_task(
     socket: TcpListener,
-    active: Arc<AtomicBool>,
-    signal: Signal,
+    token: CancellationToken,
     manager: NewLinkChannelSender,
 ) -> ZResult<()> {
     async fn accept(socket: &TcpListener) -> ZResult<(TcpStream, SocketAddr)> {
@@ -445,12 +445,21 @@ async fn accept_task(
     })?;
 
     log::trace!("Ready to accept TCP connections on: {:?}", src_addr);
-    while active.load(Ordering::Acquire) {
-        let (stream, dst_addr) = tokio::select! {
-            _ = signal.wait() => break,
+    loop {
+        tokio::select! {
+            _ = token.cancelled() => break,
             res = accept(&socket) => {
                 match res {
-                    Ok((stream, addr)) => (stream, addr),
+                    Ok((stream, dst_addr)) => {
+                        log::debug!("Accepted TCP connection on {:?}: {:?}", src_addr, dst_addr);
+                        // Create the new link object
+                        let link = Arc::new(LinkUnicastTcp::new(stream, src_addr, dst_addr));
+
+                        // Communicate the new link to the initial transport manager
+                        if let Err(e) = manager.send_async(LinkUnicast(link)).await {
+                            log::error!("{}-{}: {}", file!(), line!(), e)
+                        }
+                    },
                     Err(e) => {
                         log::warn!("{}. Hint: increase the system open file limit.", e);
                         // Throttle the accept loop upon an error
@@ -460,21 +469,11 @@ async fn accept_task(
                         //       tool. In case of systemd-based systems, this can be changed by using the
                         //       "sysctl" command line tool.
                         tokio::time::sleep(Duration::from_micros(*TCP_ACCEPT_THROTTLE_TIME)).await;
-                        continue;
                     }
 
                 }
             }
         };
-
-        log::debug!("Accepted TCP connection on {:?}: {:?}", src_addr, dst_addr);
-        // Create the new link object
-        let link = Arc::new(LinkUnicastTcp::new(stream, src_addr, dst_addr));
-
-        // Communicate the new link to the initial transport manager
-        if let Err(e) = manager.send_async(LinkUnicast(link)).await {
-            log::error!("{}-{}: {}", file!(), line!(), e)
-        }
     }
 
     Ok(())
