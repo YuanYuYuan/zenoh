@@ -10,9 +10,10 @@
 //
 // Contributors:
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
-use super::routing::face::Face;
+use super::routing::dispatcher::face::Face;
 use super::Runtime;
 use crate::key_expr::KeyExpr;
+use crate::net::primitives::Primitives;
 use crate::plugins::sealed::{self as plugins};
 use crate::prelude::sync::{Sample, SyncResolve};
 use crate::queryable::Query;
@@ -26,7 +27,7 @@ use std::convert::TryInto;
 use std::sync::Arc;
 use std::sync::Mutex;
 use zenoh_buffers::buffer::SplitBuffer;
-use zenoh_config::{ConfigValidator, ValidatedMap};
+use zenoh_config::{ConfigValidator, ValidatedMap, WhatAmI};
 use zenoh_plugin_trait::{PluginControl, PluginStatus};
 use zenoh_protocol::core::key_expr::keyexpr;
 use zenoh_protocol::{
@@ -39,7 +40,7 @@ use zenoh_protocol::{
     zenoh::{PushBody, RequestBody},
 };
 use zenoh_result::ZResult;
-use zenoh_transport::{primitives::Primitives, unicast::TransportUnicast};
+use zenoh_transport::unicast::TransportUnicast;
 
 pub struct AdminContext {
     runtime: Runtime,
@@ -272,7 +273,7 @@ impl AdminSpace {
             ext_tstamp: None,
             ext_nodeid: ext::NodeIdType::default(),
             body: DeclareBody::DeclareQueryable(DeclareQueryable {
-                id: 0, // TODO
+                id: 0, // @TODO use proper QueryableId (#703)
                 wire_expr: [&root_key, "/**"].concat().into(),
                 ext_info: QueryableInfo {
                     complete: 0,
@@ -286,7 +287,7 @@ impl AdminSpace {
             ext_tstamp: None,
             ext_nodeid: ext::NodeIdType::default(),
             body: DeclareBody::DeclareSubscriber(DeclareSubscriber {
-                id: 0, // TODO
+                id: 0, // @TODO use proper SubscriberId (#703)
                 wire_expr: [&root_key, "/config/**"].concat().into(),
                 ext_info: SubscriberInfo::default(),
             }),
@@ -448,6 +449,38 @@ impl Primitives for AdminSpace {
     }
 }
 
+impl crate::net::primitives::EPrimitives for AdminSpace {
+    #[inline]
+    fn send_declare(&self, ctx: crate::net::routing::RoutingContext<Declare>) {
+        (self as &dyn Primitives).send_declare(ctx.msg)
+    }
+
+    #[inline]
+    fn send_push(&self, msg: Push) {
+        (self as &dyn Primitives).send_push(msg)
+    }
+
+    #[inline]
+    fn send_request(&self, ctx: crate::net::routing::RoutingContext<Request>) {
+        (self as &dyn Primitives).send_request(ctx.msg)
+    }
+
+    #[inline]
+    fn send_response(&self, ctx: crate::net::routing::RoutingContext<Response>) {
+        (self as &dyn Primitives).send_response(ctx.msg)
+    }
+
+    #[inline]
+    fn send_response_final(&self, ctx: crate::net::routing::RoutingContext<ResponseFinal>) {
+        (self as &dyn Primitives).send_response_final(ctx.msg)
+    }
+
+    #[inline]
+    fn send_close(&self) {
+        (self as &dyn Primitives).send_close()
+    }
+}
+
 fn router_data(context: &AdminContext, query: Query) {
     let reply_key: OwnedKeyExpr = format!("@/router/{}", context.zid_str).try_into().unwrap();
 
@@ -584,10 +617,8 @@ fn routers_linkstate_data(context: &AdminContext, query: Query) {
             reply_key,
             Value::from(
                 tables
-                    .routers_net
-                    .as_ref()
-                    .map(|net| net.dot())
-                    .unwrap_or_else(|| "graph {}".to_string())
+                    .hat_code
+                    .info(&tables, WhatAmI::Router)
                     .as_bytes()
                     .to_vec(),
             )
@@ -611,10 +642,8 @@ fn peers_linkstate_data(context: &AdminContext, query: Query) {
             reply_key,
             Value::from(
                 tables
-                    .peers_net
-                    .as_ref()
-                    .map(|net| net.dot())
-                    .unwrap_or_else(|| "graph {}".to_string())
+                    .hat_code
+                    .info(&tables, WhatAmI::Peer)
                     .as_bytes()
                     .to_vec(),
             )
@@ -628,7 +657,7 @@ fn peers_linkstate_data(context: &AdminContext, query: Query) {
 
 fn subscribers_data(context: &AdminContext, query: Query) {
     let tables = zread!(context.runtime.state.router.tables.tables);
-    for sub in tables.router_subs.iter() {
+    for sub in tables.hat_code.get_subscriptions(&tables) {
         let key = KeyExpr::try_from(format!(
             "@/router/{}/subscriber/{}",
             context.zid_str,
@@ -645,7 +674,7 @@ fn subscribers_data(context: &AdminContext, query: Query) {
 
 fn queryables_data(context: &AdminContext, query: Query) {
     let tables = zread!(context.runtime.state.router.tables.tables);
-    for qabl in tables.router_qabls.iter() {
+    for qabl in tables.hat_code.get_queryables(&tables) {
         let key = KeyExpr::try_from(format!(
             "@/router/{}/queryable/{}",
             context.zid_str,
@@ -685,7 +714,7 @@ fn plugins_status(context: &AdminContext, query: Query) {
 
     for plugin in guard.started_plugins_iter() {
         with_extended_string(&mut root_key, &[plugin.name()], |plugin_key| {
-            // TODO: response to "__version__", this need not to be implemented by each plugin
+            // @TODO: response to "__version__", this need not to be implemented by each plugin
             with_extended_string(plugin_key, &["/__path__"], |plugin_path_key| {
                 if let Ok(key_expr) = KeyExpr::try_from(plugin_path_key.clone()) {
                     if query.key_expr().intersects(&key_expr) {
