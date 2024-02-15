@@ -14,15 +14,14 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::runtime::Handle;
 use zenoh::prelude::r#async::*;
 use zenoh_core::ztimeout;
-use tokio::runtime::Handle;
 
 const TIMEOUT: Duration = Duration::from_secs(60);
 const SLEEP: Duration = Duration::from_secs(1);
 
 const MSG_SIZE: [usize; 2] = [1_024, 100_000];
-
 
 async fn open_p2p_sessions() -> (Session, Session, Session) {
     // Open the sessions
@@ -193,7 +192,7 @@ async fn test_unicity_qryrep(s01: &Session, s02: &Session, s03: &Session) {
                 let rep = Sample::try_from(key_expr, vec![0u8; size]).unwrap();
                 tokio::task::block_in_place(move || {
                     Handle::current().block_on(async move {
-                         ztimeout!(sample.reply(Ok(rep)).res_async()).unwrap()
+                        ztimeout!(sample.reply(Ok(rep)).res_async()).unwrap()
                     });
                 });
             })
