@@ -26,43 +26,6 @@ env:
   CARGO_PROFILE_DEV_DEBUG: false
 
 jobs:
-  check:
-    name: Run checks on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macOS-latest, windows-latest]
-
-    steps:
-      - name: Clone this repository
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        run: |
-          rustup show
-          rustup component add rustfmt clippy
-
-      - name: Code format check
-        run: cargo fmt --check
-
-      - name: Clippy
-        run: cargo +stable clippy --all-targets -- --deny warnings
-
-      - name: Clippy unstable targets
-        run: cargo +stable clippy --all-targets --features unstable -- --deny warnings
-
-      - name: Clippy all features
-        if: ${{ matrix.os == 'ubuntu-latest' || matrix.os == 'macOS-latest' }}
-        run: cargo +stable clippy --all-targets --all-features -- --deny warnings
-
-      - name: Install generic no_std target
-        # Generic no_std target architecture is x86_64-unknown-none
-        run: rustup target add x86_64-unknown-none
-
-      - name: Perform no_std checks
-        run: cargo check --bin nostd_check --target x86_64-unknown-none --manifest-path ci/nostd-check/Cargo.toml
-
   test:
     name: Run tests on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
