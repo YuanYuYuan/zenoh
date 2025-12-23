@@ -95,6 +95,7 @@ zenoh-stats = { workspace = true, optional = true }
 zenoh-sync = { workspace = true }
 zenoh-task = { workspace = true }
 zenoh-util = { workspace = true }
+zenoh-uring = { workspace = true }
 
 [dev-dependencies]
 zenoh-protocol = { workspace = true, features = ["test"] }

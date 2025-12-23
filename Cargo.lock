@@ -195,6 +195,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "atomic-queue"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7fddad1ccccb94b03dd3c135815cc7672a5992a65c024a33af2ab11db6e341ff"
+
+[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1538,6 +1544,28 @@ checksum = "617ee6cf8e3f66f3b4ea67a4058564628cde41901316e19f559e14c7c72c5e7b"
 dependencies = [
  "core-foundation-sys",
  "mach2",
+]
+
+[[package]]
+name = "io-lifetimes"
+version = "1.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eae7b9aee968036d54dce06cebaefd919e4472e753296daccd6d344e3e2df0c2"
+dependencies = [
+ "hermit-abi 0.3.9",
+ "libc",
+ "windows-sys 0.48.0",
+]
+
+[[package]]
+name = "io-uring"
+version = "0.7.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fdd7bddefd0a8833b88a4b68f90dae22c7450d11b354198baee3874fd811b344"
+dependencies = [
+ "bitflags 2.10.0",
+ "cfg-if 1.0.4",
+ "libc",
 ]
 
 [[package]]
@@ -5672,7 +5700,19 @@ dependencies = [
  "zenoh-sync",
  "zenoh-task",
  "zenoh-test",
+ "zenoh-uring",
  "zenoh-util",
+]
+
+[[package]]
+name = "zenoh-uring"
+version = "1.7.1"
+dependencies = [
+ "atomic-queue",
+ "io-uring",
+ "libc",
+ "zenoh-core",
+ "zenoh-result",
 ]
 
 [[package]]
