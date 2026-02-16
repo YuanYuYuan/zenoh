@@ -29,7 +29,7 @@ use zenoh_protocol::{
 use crate::{
     key_expr::KeyExpr,
     net::{
-        primitives::{DummyPrimitives, EPrimitives, Primitives},
+        primitives::{DummyPrimitives, Primitives},
         routing::{
             dispatcher::{
                 face::{Face, FaceState},
@@ -225,7 +225,7 @@ fn multisub_test() {
     });
     assert!(res.upgrade().is_none());
 
-    face0.send_close();
+    face0.close().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -457,7 +457,7 @@ async fn clean_test() {
     assert!(res4.upgrade().is_some());
     assert!(res5.upgrade().is_some());
 
-    face0.send_close();
+    face0.close().await;
     assert!(res1.upgrade().is_none());
     assert!(res2.upgrade().is_none());
     assert!(res3.upgrade().is_none());
@@ -516,10 +516,13 @@ impl ClientPrimitives {
     }
 }
 
+#[async_trait::async_trait]
 impl Primitives for ClientPrimitives {
-    fn send_interest(&self, _msg: &mut zenoh_protocol::network::Interest) {}
+    async fn send_interest(&self, _msg: zenoh_protocol::network::Interest) -> bool {
+        false
+    }
 
-    fn send_declare(&self, msg: &mut zenoh_protocol::network::Declare) {
+    async fn send_declare(&self, msg: zenoh_protocol::network::Declare) -> bool {
         match &msg.body {
             DeclareBody::DeclareKeyExpr(d) => {
                 let name = self.get_name(&d.wire_expr);
@@ -530,75 +533,29 @@ impl Primitives for ClientPrimitives {
             }
             _ => (),
         }
-    }
-
-    fn send_push_consume(
-        &self,
-        msg: &mut zenoh_protocol::network::Push,
-        _reliability: Reliability,
-        _consume: bool,
-    ) {
-        *zlock!(self.data) = Some(msg.wire_expr.to_owned());
-    }
-
-    fn send_request(&self, msg: &mut zenoh_protocol::network::Request) {
-        *zlock!(self.data) = Some(msg.wire_expr.to_owned())
-    }
-
-    fn send_response(&self, msg: &mut zenoh_protocol::network::Response) {
-        *zlock!(self.data) = Some(msg.wire_expr.to_owned())
-    }
-
-    fn send_response_final(&self, _msg: &mut zenoh_protocol::network::ResponseFinal) {}
-
-    fn send_close(&self) {}
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-}
-
-impl EPrimitives for ClientPrimitives {
-    fn send_interest(&self, _ctx: RoutingContext<&mut zenoh_protocol::network::Interest>) -> bool {
         false
     }
 
-    fn send_declare(&self, ctx: RoutingContext<&mut zenoh_protocol::network::Declare>) -> bool {
-        match &ctx.msg.body {
-            DeclareBody::DeclareKeyExpr(d) => {
-                let name = self.get_name(&d.wire_expr);
-                zlock!(self.mapping).insert(d.id, name);
-            }
-            DeclareBody::UndeclareKeyExpr(u) => {
-                zlock!(self.mapping).remove(&u.id);
-            }
-            _ => (),
-        }
-        false
-    }
-
-    fn send_push(
-        &self,
-        msg: &mut zenoh_protocol::network::Push,
-        _reliability: Reliability,
-    ) -> bool {
+    async fn send_push(&self, msg: zenoh_protocol::network::Push, _reliability: Reliability) -> bool {
         *zlock!(self.data) = Some(msg.wire_expr.to_owned());
         false
     }
 
-    fn send_request(&self, msg: &mut zenoh_protocol::network::Request) -> bool {
+    async fn send_request(&self, msg: zenoh_protocol::network::Request) -> bool {
         *zlock!(self.data) = Some(msg.wire_expr.to_owned());
         false
     }
 
-    fn send_response(&self, msg: &mut zenoh_protocol::network::Response) -> bool {
+    async fn send_response(&self, msg: zenoh_protocol::network::Response) -> bool {
         *zlock!(self.data) = Some(msg.wire_expr.to_owned());
         false
     }
 
-    fn send_response_final(&self, _msg: &mut zenoh_protocol::network::ResponseFinal) -> bool {
+    async fn send_response_final(&self, _msg: zenoh_protocol::network::ResponseFinal) -> bool {
         false
     }
+
+    async fn close(&self) {}
 
     fn as_any(&self) -> &dyn std::any::Any {
         self

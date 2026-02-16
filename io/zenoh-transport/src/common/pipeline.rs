@@ -16,10 +16,12 @@ use std::{
     ops::Add,
     sync::{
         atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering},
-        Arc, Mutex, MutexGuard,
+        Arc, Mutex as StdMutex, MutexGuard as StdMutexGuard,
     },
     time::{Duration, Instant},
 };
+
+use async_lock::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard};
 
 use crossbeam_utils::CachePadded;
 use ringbuffer_spsc::{RingBuffer, RingBufferReader, RingBufferWriter};
@@ -156,13 +158,13 @@ impl Current {
 
 // Inner structure containing mutexes for current serialization batch and SNs
 struct StageInMutex {
-    current: Arc<Mutex<Current>>,
+    current: Arc<StdMutex<Current>>,
     priority: TransportPriorityTx,
 }
 
 impl StageInMutex {
     #[inline]
-    fn channel(&self, is_reliable: bool) -> MutexGuard<'_, TransportChannelTx> {
+    fn channel(&self, is_reliable: bool) -> StdMutexGuard<'_, TransportChannelTx> {
         if is_reliable {
             zlock!(self.priority.reliable)
         } else {
@@ -554,7 +556,7 @@ impl Backoff {
 // Inner structure to link the final stage with the initial stage of the pipeline
 struct StageOutIn {
     s_out_r: RingBufferReader<BoxedWBatch, RBLEN>,
-    current: Arc<Mutex<Current>>,
+    current: Arc<StdMutex<Current>>,
     backoff: Backoff,
 }
 
@@ -657,7 +659,7 @@ impl StageOut {
         self.s_ref.refill(batch);
     }
 
-    fn drain(&mut self, guard: &mut MutexGuard<'_, Current>) -> Vec<BoxedWBatch> {
+    fn drain(&mut self, guard: &mut StdMutexGuard<'_, Current>) -> Vec<BoxedWBatch> {
         let mut batches = vec![];
         // Empty the ring buffer
         while let Some(batch) = self.s_in.s_out_r.pull() {
@@ -745,7 +747,7 @@ impl TransmissionPipeline {
             // Create the refill ring buffer
             // This is a SPSC ring buffer
             let (s_out_w, s_out_r) = RingBuffer::<BoxedWBatch, RBLEN>::init();
-            let current = Arc::new(Mutex::new(Current {
+            let current = Arc::new(StdMutex::new(Current {
                 batch: None,
                 status: status.clone(),
                 prioflag: 1 << (prio as u8),
@@ -758,7 +760,7 @@ impl TransmissionPipeline {
                 )),
             });
 
-            stage_in.push(Mutex::new(StageIn {
+            stage_in.push(AsyncMutex::new(StageIn {
                 s_ref: StageInRefill {
                     n_ref_r,
                     s_ref_r,
@@ -861,16 +863,16 @@ struct Waits {
 
 #[derive(Clone)]
 pub(crate) struct TransmissionPipelineProducer {
-    // Each priority queue has its own Mutex
-    stage_in: Arc<[Mutex<StageIn>]>,
+    // Each priority queue has its own AsyncMutex
+    stage_in: Arc<[AsyncMutex<StageIn>]>,
     status: Arc<TransmissionPipelineStatus>,
 }
 
 impl TransmissionPipelineProducer {
     #[inline]
-    pub(crate) fn push_network_message(
+    pub(crate) async fn push_network_message(
         &self,
-        msg: NetworkMessageRef,
+        msg: NetworkMessageRef<'_>,
     ) -> Result<bool, TransportClosed> {
         // If the queue is not QoS, it means that we only have one priority with index 0.
         let (idx, priority) = if self.stage_in.len() > 1 {
@@ -894,8 +896,8 @@ impl TransmissionPipelineProducer {
             (self.status.waits.wait_before_close, None)
         };
         let mut deadline = Deadline::new(wait_time, max_wait_time);
-        // Lock the channel. We are the only one that will be writing on it.
-        let mut queue = zlock!(self.stage_in[idx]);
+        // Lock the channel async. We are the only one that will be writing on it.
+        let mut queue = self.stage_in[idx].lock().await;
         // Check again for congestion in case it happens when blocking on the mutex.
         if msg.is_droppable() && self.status.is_congested(priority) {
             return Ok(false);
@@ -926,25 +928,30 @@ impl TransmissionPipelineProducer {
     }
 
     #[inline]
-    pub(crate) fn push_transport_message(&self, msg: TransportMessage, priority: Priority) -> bool {
+    pub(crate) async fn push_transport_message(&self, msg: TransportMessage, priority: Priority) -> bool {
         // If the queue is not QoS, it means that we only have one priority with index 0.
         let priority = if self.stage_in.len() > 1 {
             priority as usize
         } else {
             0
         };
-        // Lock the channel. We are the only one that will be writing on it.
-        let mut queue = zlock!(self.stage_in[priority]);
+        // Lock the channel async. We are the only one that will be writing on it.
+        let mut queue = self.stage_in[priority].lock().await;
         queue.push_transport_message(msg)
     }
 
-    pub(crate) fn disable(&self) {
+    pub(crate) async fn disable(&self) {
         self.status.set_disabled(true);
 
-        // Acquire all the locks, in_guard first, out_guard later
+        // Acquire all the locks async, in_guard first, out_guard later
         // Use the same locking order as in drain to avoid deadlocks
-        let mut in_guards: Vec<MutexGuard<'_, StageIn>> =
-            self.stage_in.iter().map(|x| zlock!(x)).collect();
+        let mut in_guards: Vec<AsyncMutexGuard<'_, StageIn>> = {
+            let mut guards = Vec::new();
+            for mutex in self.stage_in.iter() {
+                guards.push(mutex.lock().await);
+            }
+            guards
+        };
 
         // Unblock waiting pullers
         for ig in in_guards.iter_mut() {
@@ -1187,7 +1194,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn tx_pipeline_flow() -> ZResult<()> {
-        fn schedule(queue: TransmissionPipelineProducer, num_msg: usize, payload_size: usize) {
+        async fn schedule(queue: TransmissionPipelineProducer, num_msg: usize, payload_size: usize) {
             // Send reliable messages
             let key = "test".into();
 
@@ -1205,7 +1212,7 @@ mod tests {
                     "Pipeline Flow [>>>]: Pushed {} msgs ({payload_size} bytes)",
                     i + 1
                 );
-                queue.push_network_message(message.as_ref()).unwrap();
+                queue.push_network_message(message.as_ref()).await.unwrap();
             }
         }
 
@@ -1312,7 +1319,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn tx_pipeline_blocking() -> ZResult<()> {
-        fn schedule(queue: TransmissionPipelineProducer, counter: Arc<AtomicUsize>, id: usize) {
+        async fn schedule(queue: TransmissionPipelineProducer, counter: Arc<AtomicUsize>, id: usize) {
             // Make sure to put only one message per batch: set the payload size
             // to half of the batch in such a way the serialized zenoh message
             // will be larger then half of the batch size (header + payload).
@@ -1334,7 +1341,7 @@ mod tests {
                 println!(
                     "Pipeline Blocking [>>>]: ({id}) Scheduling message #{i} with payload size of {payload_size} bytes"
                 );
-                queue.push_network_message(message.as_ref()).unwrap();
+                queue.push_network_message(message.as_ref()).await.unwrap();
                 let c = counter.fetch_add(1, Ordering::AcqRel);
                 println!(
                     "Pipeline Blocking [>>>]: ({}) Scheduled message #{} (tot {}) with payload size of {} bytes",
@@ -1439,7 +1446,7 @@ mod tests {
         let size = Arc::new(AtomicUsize::new(0));
 
         let c_size = size.clone();
-        task::spawn_blocking(move || {
+        task::spawn(async move {
             loop {
                 let payload_sizes: [usize; 16] = [
                     8, 16, 32, 64, 128, 256, 512, 1_024, 2_048, 4_096, 8_192, 16_384, 32_768,
@@ -1464,7 +1471,7 @@ mod tests {
                     let duration = Duration::from_millis(5_500);
                     let start = Instant::now();
                     while start.elapsed() < duration {
-                        producer.push_network_message(message.as_ref()).unwrap();
+                        producer.push_network_message(message.as_ref()).await.unwrap();
                     }
                 }
             }
@@ -1518,9 +1525,9 @@ mod tests {
                 ..Push::from(vec![42u8])
             });
             // First message should not be rejected as the is one batch available in the queue
-            assert!(producer.push_network_message(message.as_ref()).is_ok());
+            assert!(producer.push_network_message(message.as_ref()).await.is_ok());
             // Second message should be rejected
-            assert!(producer.push_network_message(message.as_ref()).is_err());
+            assert!(producer.push_network_message(message.as_ref()).await.is_err());
         }
 
         Ok(())

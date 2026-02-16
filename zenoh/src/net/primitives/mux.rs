@@ -160,7 +160,7 @@ impl Primitives for Mux {
             .load()
             .intercept(&mut net_msg, &mut ctx as &mut dyn InterceptorContext)
         {
-            self.handler.schedule(net_msg).unwrap_or(false)
+            self.handler.schedule(net_msg).await.unwrap_or(false)
         } else {
             // send declare final to avoid timeout on blocked interest
             if let Some(face) = self.face.get().and_then(|f| f.upgrade()) {
@@ -185,7 +185,7 @@ impl Primitives for Mux {
             .load()
             .intercept(&mut net_msg, &mut ctx as &mut dyn InterceptorContext)
         {
-            self.handler.schedule(net_msg).unwrap_or(false)
+            self.handler.schedule(net_msg).await.unwrap_or(false)
         } else {
             false
         }
@@ -205,7 +205,7 @@ impl Primitives for Mux {
         if interceptor.interceptors.is_empty()
             || interceptor.intercept(&mut net_msg, &mut ctx as &mut dyn InterceptorContext)
         {
-            self.handler.schedule(net_msg).unwrap_or(false)
+            self.handler.schedule(net_msg).await.unwrap_or(false)
         } else {
             false
         }
@@ -224,10 +224,10 @@ impl Primitives for Mux {
         };
         let interceptor = self.interceptor.load();
         if interceptor.interceptors.is_empty() {
-            self.handler.schedule(net_msg).unwrap_or(false)
+            self.handler.schedule(net_msg).await.unwrap_or(false)
         } else if let Some(face) = self.face.get().and_then(|f| f.upgrade()) {
             if interceptor.intercept(&mut net_msg, &mut ctx as &mut dyn InterceptorContext) {
-                self.handler.schedule(net_msg).unwrap_or(false)
+                self.handler.schedule(net_msg).await.unwrap_or(false)
             } else {
                 // request was blocked by an interceptor, send response final to avoid timeout
                 face.send_response_final(ResponseFinal {
@@ -257,7 +257,7 @@ impl Primitives for Mux {
         if interceptor.interceptors.is_empty()
             || interceptor.intercept(&mut net_msg, &mut ctx as &mut dyn InterceptorContext)
         {
-            self.handler.schedule(net_msg).unwrap_or(false)
+            self.handler.schedule(net_msg).await.unwrap_or(false)
         } else {
             false
         }
@@ -277,7 +277,7 @@ impl Primitives for Mux {
         if interceptor.interceptors.is_empty()
             || interceptor.intercept(&mut net_msg, &mut ctx as &mut dyn InterceptorContext)
         {
-            self.handler.schedule(net_msg).unwrap_or(false)
+            self.handler.schedule(net_msg).await.unwrap_or(false)
         } else {
             false
         }
@@ -412,7 +412,7 @@ impl Primitives for McastMux {
             .load()
             .intercept(&mut net_msg, &mut ctx as &mut dyn InterceptorContext)
         {
-            self.handler.schedule(net_msg).unwrap_or(false)
+            self.handler.schedule(net_msg).await.unwrap_or(false)
         } else {
             // send declare final to avoid timeout on blocked interest
             if let Some(face) = self.face.get() {
@@ -437,7 +437,7 @@ impl Primitives for McastMux {
             .load()
             .intercept(&mut net_msg, &mut ctx as &mut dyn InterceptorContext)
         {
-            self.handler.schedule(net_msg).unwrap_or(false)
+            self.handler.schedule(net_msg).await.unwrap_or(false)
         } else {
             false
         }
@@ -457,7 +457,7 @@ impl Primitives for McastMux {
         if interceptor.interceptors.is_empty()
             || interceptor.intercept(&mut net_msg, &mut ctx as &mut dyn InterceptorContext)
         {
-            self.handler.schedule(net_msg).unwrap_or(false)
+            self.handler.schedule(net_msg).await.unwrap_or(false)
         } else {
             false
         }
@@ -476,10 +476,10 @@ impl Primitives for McastMux {
         };
         let interceptor = self.interceptor.load();
         if interceptor.interceptors.is_empty() {
-            self.handler.schedule(net_msg).unwrap_or(false)
+            self.handler.schedule(net_msg).await.unwrap_or(false)
         } else if let Some(face) = self.face.get() {
             if interceptor.intercept(&mut net_msg, &mut ctx as &mut dyn InterceptorContext) {
-                self.handler.schedule(net_msg).unwrap_or(false)
+                self.handler.schedule(net_msg).await.unwrap_or(false)
             } else {
                 // request was blocked by an interceptor, send response final to avoid timeout
                 face.send_response_final(ResponseFinal {
@@ -509,7 +509,7 @@ impl Primitives for McastMux {
         if interceptor.interceptors.is_empty()
             || interceptor.intercept(&mut net_msg, &mut ctx as &mut dyn InterceptorContext)
         {
-            self.handler.schedule(net_msg).unwrap_or(false)
+            self.handler.schedule(net_msg).await.unwrap_or(false)
         } else {
             false
         }
@@ -529,7 +529,7 @@ impl Primitives for McastMux {
         if interceptor.interceptors.is_empty()
             || interceptor.intercept(&mut net_msg, &mut ctx as &mut dyn InterceptorContext)
         {
-            self.handler.schedule(net_msg).unwrap_or(false)
+            self.handler.schedule(net_msg).await.unwrap_or(false)
         } else {
             false
         }

@@ -448,8 +448,8 @@ impl TransportUnicastTrait for TransportUnicastUniversal {
     /*************************************/
     /*                TX                 */
     /*************************************/
-    fn schedule(&self, msg: NetworkMessageMut) -> ZResult<bool> {
-        self.internal_schedule(msg)
+    async fn schedule(&self, msg: NetworkMessageMut<'_>) -> ZResult<bool> {
+        self.internal_schedule(msg).await
     }
 
     fn add_debug_fields<'a, 'b: 'a, 'c>(

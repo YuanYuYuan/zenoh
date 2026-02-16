@@ -369,13 +369,13 @@ impl Network {
         .into())
     }
 
-    fn send_on_link(&self, mut idxs: Vec<(NodeIndex, Details)>, transport: &TransportUnicast) {
+    async fn send_on_link(&self, mut idxs: Vec<(NodeIndex, Details)>, transport: &TransportUnicast) {
         for idx in &mut idxs {
             idx.1.locators = self.propagate_locators(idx.0, transport);
         }
         if let Ok(mut msg) = self.make_msg(&idxs) {
             tracing::trace!("{} Send to {:?} {:?}", self.name, transport.get_zid(), msg);
-            if let Err(e) = transport.schedule(msg.as_mut()) {
+            if let Err(e) = transport.schedule(msg.as_mut()).await {
                 tracing::debug!("{} Error sending LinkStateList: {}", self.name, e);
             }
         } else {
@@ -393,10 +393,16 @@ impl Network {
             }
             if let Ok(msg) = self.make_msg(&idxs) {
                 if parameters(link) {
-                    tracing::trace!("{} Send to {} {:?}", self.name, link.zid, msg);
-                    if let Err(e) = link.transport.schedule(msg.clone().as_mut()) {
-                        tracing::debug!("{} Error sending LinkStateList: {}", self.name, e);
-                    }
+                    let name = self.name.clone();
+                    let zid = link.zid;
+                    let transport = link.transport.clone();
+                    let mut msg = zenoh_protocol::network::NetworkMessageExt::to_owned(&msg);
+                    zenoh_runtime::ZRuntime::Net.spawn(async move {
+                        tracing::trace!("{} Send to {} {:?}", name, zid, msg);
+                        if let Err(e) = transport.schedule(msg.as_mut()).await {
+                            tracing::debug!("{} Error sending LinkStateList: {}", name, e);
+                        }
+                    });
                 }
             } else {
                 tracing::error!("Failed to encode Linkstate message");
@@ -878,49 +884,59 @@ impl Network {
             }
 
             // Send updated self linkstate on all existing links except new one
-            self.links
-                .values()
-                .filter(|link| {
-                    link.zid != zid
-                        && (self.full_linkstate
-                            || self.gossip_multihop
-                            || link.transport.get_whatami().unwrap_or(WhatAmI::Peer)
-                                == WhatAmI::Router)
-                })
-                .for_each(|link| {
-                    self.send_on_link(
-                        if new || (!self.full_linkstate && !self.gossip_multihop) {
-                            vec![
-                                (
-                                    idx,
-                                    Details {
-                                        zid: true,
-                                        links: false,
-                                        ..Default::default()
-                                    },
-                                ),
-                                (
-                                    self.idx,
-                                    Details {
-                                        zid: false,
-                                        links: true,
-                                        ..Default::default()
-                                    },
-                                ),
-                            ]
-                        } else {
-                            vec![(
+            for link in self.links.values() {
+                if link.zid != zid
+                    && (self.full_linkstate
+                        || self.gossip_multihop
+                        || link.transport.get_whatami().unwrap_or(WhatAmI::Peer)
+                            == WhatAmI::Router)
+                {
+                    let idxs = if new || (!self.full_linkstate && !self.gossip_multihop) {
+                        vec![
+                            (
+                                idx,
+                                Details {
+                                    zid: true,
+                                    links: false,
+                                    ..Default::default()
+                                },
+                            ),
+                            (
                                 self.idx,
                                 Details {
                                     zid: false,
                                     links: true,
                                     ..Default::default()
                                 },
-                            )]
-                        },
-                        &link.transport,
-                    )
-                });
+                            ),
+                        ]
+                    } else {
+                        vec![(
+                            self.idx,
+                            Details {
+                                zid: false,
+                                links: true,
+                                ..Default::default()
+                            },
+                        )]
+                    };
+
+                    // Generate message before spawning
+                    if let Ok(msg) = self.make_msg(&idxs) {
+                        let name = self.name.clone();
+                        let transport = link.transport.clone();
+                        let mut msg = zenoh_protocol::network::NetworkMessageExt::to_owned(&msg);
+                        zenoh_runtime::ZRuntime::Net.spawn(async move {
+                            tracing::trace!("{} Send to {:?} {:?}", name, transport.get_zid(), msg);
+                            if let Err(e) = transport.schedule(msg.as_mut()).await {
+                                tracing::debug!("{} Error sending LinkStateList: {}", name, e);
+                            }
+                        });
+                    } else {
+                        tracing::error!("Failed to encode Linkstate message");
+                    }
+                }
+            }
         }
 
         // Send all nodes linkstate on new link

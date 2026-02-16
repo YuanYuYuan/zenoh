@@ -21,37 +21,34 @@ use crate::shm::map_zmsg_to_partner;
 
 //noinspection ALL
 impl TransportMulticastInner {
-    fn schedule_on_link(&self, msg: NetworkMessageRef) -> ZResult<bool> {
-        let guard = zread!(self.link);
-        match guard.as_ref() {
-            Some(l) => {
-                if let Some(pl) = l.pipeline.as_ref() {
-                    let pl = pl.clone();
-                    drop(guard);
-                    return Ok(pl.push_network_message(msg)?);
-                }
-            }
-            None => {
-                tracing::trace!(
-                    "Message dropped because the transport has no links: {}",
-                    msg
-                );
-            }
-        }
+    async fn schedule_on_link(&self, msg: NetworkMessageRef<'_>) -> ZResult<bool> {
+        // Clone pipeline in a separate scope to ensure guard is dropped
+        let pipeline_opt = {
+            let guard = zread!(self.link);
+            guard.as_ref().and_then(|l| l.pipeline.as_ref()).cloned()
+        }; // guard is dropped here
 
-        Ok(false)
+        if let Some(pl) = pipeline_opt {
+            Ok(pl.push_network_message(msg).await?)
+        } else {
+            tracing::trace!(
+                "Message dropped because the transport has no links: {}",
+                msg
+            );
+            Ok(false)
+        }
     }
 
     #[allow(unused_mut)] // When feature "shared-memory" is not enabled
     #[allow(clippy::let_and_return)] // When feature "stats" is not enabled
     #[inline(always)]
-    pub(super) fn schedule(&self, mut msg: NetworkMessageMut) -> ZResult<bool> {
+    pub(super) async fn schedule(&self, mut msg: NetworkMessageMut<'_>) -> ZResult<bool> {
         #[cfg(feature = "shared-memory")]
         if let Some(shm_context) = &self.shm_context {
             map_zmsg_to_partner(&mut msg, &shm_context.shm_config, &shm_context.shm_provider);
         }
 
-        let res = self.schedule_on_link(msg.as_ref())?;
+        let res = self.schedule_on_link(msg.as_ref()).await?;
 
         #[cfg(feature = "stats")]
         if res {

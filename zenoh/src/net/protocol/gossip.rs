@@ -227,14 +227,14 @@ impl Gossip {
         .into())
     }
 
-    fn send_on_link(&self, idxs: Vec<(NodeIndex, Details)>, transport: &TransportUnicast) {
+    async fn send_on_link(&self, idxs: Vec<(NodeIndex, Details)>, transport: &TransportUnicast) {
         if transport
             .get_whatami()
             .is_ok_and(|w| self.gossip_target.matches(w))
         {
             if let Ok(mut msg) = self.make_msg(idxs) {
                 tracing::trace!("{} Send to {:?} {:?}", self.name, transport.get_zid(), msg);
-                if let Err(e) = transport.schedule(msg.as_mut()) {
+                if let Err(e) = transport.schedule(msg.as_mut()).await {
                     tracing::debug!("{} Error sending LinkStateList: {}", self.name, e);
                 }
             } else {
@@ -243,7 +243,7 @@ impl Gossip {
         }
     }
 
-    fn send_on_links<P>(&self, idxs: Vec<(NodeIndex, Details)>, mut parameters: P)
+    async fn send_on_links<P>(&self, idxs: Vec<(NodeIndex, Details)>, mut parameters: P)
     where
         P: FnMut(&Link) -> bool,
     {
@@ -256,7 +256,7 @@ impl Gossip {
                     && parameters(link)
                 {
                     tracing::trace!("{} Send to {} {:?}", self.name, link.zid, msg);
-                    if let Err(e) = link.transport.schedule(msg.clone().as_mut()) {
+                    if let Err(e) = link.transport.schedule(msg.clone().as_mut()).await {
                         tracing::debug!("{} Error sending LinkStateList: {}", self.name, e);
                     }
                 }
@@ -457,43 +457,62 @@ impl Gossip {
         self.graph[self.idx].sn += 1;
 
         // Send updated self linkstate on all existing links except new one
-        self.links
-            .values()
-            .filter(|link| link.zid != zid && link.remote_bound.is_south())
-            .for_each(|link| {
-                self.send_on_link(
-                    if new {
-                        vec![
-                            (
-                                idx,
-                                Details {
-                                    zid: true,
-                                    locators: false,
-                                    links: false,
-                                },
-                            ),
-                            (
-                                self.idx,
-                                Details {
-                                    zid: false,
-                                    locators: true,
-                                    links: true,
-                                },
-                            ),
-                        ]
-                    } else {
-                        vec![(
+        for link in self.links.values() {
+            if link.zid != zid
+                && link.transport.get_whatami().unwrap_or(WhatAmI::Peer) == WhatAmI::Router
+            {
+                let idxs = if new {
+                    vec![
+                        (
+                            idx,
+                            Details {
+                                zid: true,
+                                locators: false,
+                                links: false,
+                            },
+                        ),
+                        (
                             self.idx,
                             Details {
                                 zid: false,
                                 locators: true,
                                 links: true,
                             },
-                        )]
-                    },
-                    &link.transport,
-                )
-            });
+                        ),
+                    ]
+                } else {
+                    vec![(
+                        self.idx,
+                        Details {
+                            zid: false,
+                            locators: true,
+                            links: true,
+                        },
+                    )]
+                };
+
+                // Generate message before spawning
+                if let Ok(msg) = self.make_msg(idxs) {
+                    let name = self.name.clone();
+                    let transport = link.transport.clone();
+                    let gossip_target = self.gossip_target;
+                    let mut msg = zenoh_protocol::network::NetworkMessageExt::to_owned(&msg);
+                    zenoh_runtime::ZRuntime::Net.spawn(async move {
+                        if transport
+                            .get_whatami()
+                            .is_ok_and(|w| gossip_target.matches(w))
+                        {
+                            tracing::trace!("{} Send to {:?} {:?}", name, transport.get_zid(), msg);
+                            if let Err(e) = transport.schedule(msg.as_mut()).await {
+                                tracing::debug!("{} Error sending LinkStateList: {}", name, e);
+                            }
+                        }
+                    });
+                } else {
+                    tracing::error!("Failed to encode Linkstate message");
+                }
+            }
+        }
 
         // Send all nodes linkstate on new link
         let idxs = self
