@@ -648,7 +648,7 @@ impl Network {
                 // random backoff
                 let sleep_time =
                     std::time::Duration::from_millis(rand::thread_rng().gen_range(0..100));
-                tokio::time::sleep(sleep_time).await;
+                async_io::Timer::after(sleep_time).await;
                 runtime.connect_peer(&zid, &locators).await;
             }
         });

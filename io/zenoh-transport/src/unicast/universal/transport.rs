@@ -22,7 +22,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use tokio::sync::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard};
+use async_lock::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard};
 use zenoh_core::{zasynclock, zcondfeat, zread, zwrite};
 use zenoh_link::Link;
 use zenoh_protocol::{

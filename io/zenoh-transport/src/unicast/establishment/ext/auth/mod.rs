@@ -22,7 +22,7 @@ use async_trait::async_trait;
 #[cfg(feature = "auth_pubkey")]
 pub use pubkey::*;
 use rand::{CryptoRng, Rng};
-use tokio::sync::{Mutex, RwLock};
+use async_lock::{Mutex, RwLock};
 #[cfg(feature = "auth_usrpwd")]
 pub use usrpwd::*;
 use zenoh_buffers::{

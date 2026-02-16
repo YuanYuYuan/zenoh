@@ -19,6 +19,7 @@ use std::{
 use zenoh_core::{Resolvable, Wait};
 use zenoh_protocol::{core::CongestionControl, network::request::ext::QueryTarget};
 use zenoh_result::ZResult;
+use zenoh_runtime::ZRuntime;
 
 #[cfg(feature = "unstable")]
 use crate::api::cancellation::CancellationTokenBuilderTrait;
@@ -160,7 +161,7 @@ impl<Handler> CancellationTokenBuilderTrait for SessionGetBuilder<'_, '_, Handle
     ///     .await
     ///     .unwrap();
     ///
-    /// tokio::task::spawn(async move {
+    /// ZRuntime::Application.spawn(async move {
     ///     tokio::time::sleep(std::time::Duration::from_secs(10)).await;
     ///     ct.cancel().await.unwrap();
     /// });

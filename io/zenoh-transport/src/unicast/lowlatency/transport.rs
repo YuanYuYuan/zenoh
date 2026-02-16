@@ -19,7 +19,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use tokio::sync::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard, RwLock};
+use async_lock::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard, RwLock};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use zenoh_core::{zasynclock, zasyncread, zasyncwrite, zread, zwrite};
 use zenoh_link::Link;

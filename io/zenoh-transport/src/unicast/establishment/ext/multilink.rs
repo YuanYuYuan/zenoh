@@ -14,7 +14,7 @@
 use async_trait::async_trait;
 use rand::{CryptoRng, Rng};
 use rsa::{BigUint, RsaPrivateKey, RsaPublicKey};
-use tokio::sync::{Mutex, RwLock};
+use async_lock::{Mutex, RwLock};
 use zenoh_buffers::{
     reader::{DidntRead, HasReader, Reader},
     writer::{DidntWrite, Writer},

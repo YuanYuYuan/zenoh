@@ -76,7 +76,7 @@ impl TreesComputationWorker {
         let (tx, rx) = flume::bounded::<Arc<TablesLock>>(1);
         let task = TerminatableTask::spawn_abortable(zenoh_runtime::ZRuntime::Net, async move {
             loop {
-                tokio::time::sleep(std::time::Duration::from_millis(
+                async_io::Timer::after(std::time::Duration::from_millis(
                     *TREES_COMPUTATION_DELAY_MS,
                 ))
                 .await;

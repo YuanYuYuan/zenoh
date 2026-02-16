@@ -34,6 +34,7 @@ use zenoh_protocol::{
 };
 use zenoh_sync::get_mut_unchecked;
 use zenoh_util::Timed;
+use zenoh_runtime::ZRuntime;
 
 use super::{
     face::FaceState,
@@ -400,7 +401,7 @@ impl QueryCleanup {
             face.task_controller
                 .spawn_with_rt(zenoh_runtime::ZRuntime::Net, async move {
                     tokio::select! {
-                        _ = tokio::time::sleep(timeout) => { cleanup.run().await }
+                        _ = async_io::Timer::after(timeout) => { cleanup.run().await }
                         _ = c_cancellation_token.cancelled() => {}
                     }
                 });
@@ -712,7 +713,7 @@ pub(crate) fn finalize_pending_query(query: (Arc<Query>, CancellationToken)) {
         tracing::debug!("{}:{} Propagate final reply", query.src_face, query.src_qid);
         let primitives = query.src_face.primitives.clone();
         let rid = query.src_qid;
-        tokio::spawn(async move {
+        ZRuntime::Net.spawn(async move {
             primitives
                 .send_response_final(ResponseFinal {
                     rid,

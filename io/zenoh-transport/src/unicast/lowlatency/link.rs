@@ -15,7 +15,7 @@
 use std::sync::OnceLock;
 use std::{sync::Arc, time::Duration};
 
-use tokio::sync::RwLock;
+use async_lock::RwLock;
 use tokio_util::sync::CancellationToken;
 use zenoh_buffers::{writer::HasWriter, ZSlice};
 use zenoh_codec::*;
@@ -175,7 +175,7 @@ impl TransportUnicastLowlatency {
 
                 tokio::select! {
                     // Async read from the underlying link
-                    res = tokio::time::timeout(lease, read_with_link(&link_rx, &mut buffer, is_streamed)) => {
+                    res = async_std::future::timeout(lease, read_with_link(&link_rx, &mut buffer, is_streamed)) => {
                         let bytes = res.map_err(|_| zerror!("{}: expired after {} milliseconds", link_rx, lease.as_millis()))??;
 
                         #[cfg(feature = "stats")] {
@@ -231,12 +231,9 @@ async fn keepalive_task(
     token: CancellationToken,
     #[cfg(feature = "stats")] stats: Arc<OnceLock<zenoh_stats::LinkStats>>,
 ) -> ZResult<()> {
-    let mut interval =
-        tokio::time::interval_at(tokio::time::Instant::now() + keep_alive, keep_alive);
-
     loop {
         tokio::select! {
-            _ = interval.tick() => {
+            _ = async_io::Timer::after(keep_alive) => {
                 let keepailve = TransportMessageLowLatencyRef {
                     body: TransportBodyLowLatencyRef::KeepAlive(KeepAlive),
                 };

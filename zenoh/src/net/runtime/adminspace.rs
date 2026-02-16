@@ -44,6 +44,7 @@ use zenoh_protocol::{
     zenoh::{PushBody, RequestBody},
 };
 use zenoh_result::ZResult;
+use zenoh_runtime::ZRuntime;
 use zenoh_transport::{multicast::TransportMulticast, unicast::TransportUnicast, TransportPeer};
 
 use super::{routing::dispatcher::face::Face, Runtime};

@@ -163,7 +163,7 @@ impl CurrentInterestCleanup {
             face.task_controller
                 .spawn_with_rt(zenoh_runtime::ZRuntime::Net, async move {
                     tokio::select! {
-                        _ = tokio::time::sleep(cleanup.interests_timeout) => { cleanup.run().await }
+                        _ = async_io::Timer::after(cleanup.interests_timeout) => { cleanup.run().await }
                         _ = cancellation_token.cancelled() => {}
                         _ = rejection_token.cancelled() => { cleanup.execute(false).await }
                     }

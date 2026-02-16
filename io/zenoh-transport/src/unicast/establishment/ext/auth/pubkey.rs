@@ -20,7 +20,7 @@ use rsa::{
     traits::PublicKeyParts,
     BigUint, Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey,
 };
-use tokio::sync::{Mutex, RwLock};
+use async_lock::{Mutex, RwLock};
 use zenoh_buffers::{
     reader::{DidntRead, HasReader, Reader},
     writer::{DidntWrite, HasWriter, Writer},

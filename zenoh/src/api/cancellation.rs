@@ -432,7 +432,7 @@ mod test {
 
         let ct_clone = ct.clone();
         let n_clone = n.clone();
-        let t = tokio::spawn(async move {
+        let t = ZRuntime::Application.spawn(async move {
             ct_clone.cancel().await.unwrap();
             n_clone.load(std::sync::atomic::Ordering::SeqCst)
         });

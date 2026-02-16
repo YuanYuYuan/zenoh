@@ -54,7 +54,9 @@ unstable = ["zenoh-config/unstable", "zenoh-protocol/unstable"]
 
 [dependencies]
 async-channel = { workspace = true }
+async-io = { workspace = true }
 async-lock = { workspace = true }
+async-std = { workspace = true }
 async-trait = { workspace = true }
 crossbeam-utils = { workspace = true }
 flume = { workspace = true }

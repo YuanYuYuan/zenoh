@@ -13,7 +13,7 @@
 //
 use std::{collections::HashMap, fmt, sync::Arc, time::Duration};
 
-use tokio::sync::Mutex;
+use async_lock::Mutex;
 #[cfg(feature = "transport_compression")]
 use zenoh_config::CompressionMulticastConf;
 use zenoh_config::{Config, LinkTxConf};

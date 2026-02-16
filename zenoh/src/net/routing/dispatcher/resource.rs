@@ -33,6 +33,7 @@ use zenoh_protocol::{
     },
 };
 use zenoh_sync::{get_mut_unchecked, Cache, CacheValueType};
+use zenoh_runtime::ZRuntime;
 
 use super::{
     face::FaceState,
@@ -703,7 +704,7 @@ impl Resource {
                         .insert(expr_id, nonwild_prefix.clone());
                     let primitives = face.primitives.clone();
                     let expr_str = nonwild_prefix.expr().to_string();
-                    tokio::spawn(async move {
+                    ZRuntime::Net.spawn(async move {
                         let ctx = RoutingContext::with_expr(
                             Declare {
                                 interest_id: None,

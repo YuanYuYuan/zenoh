@@ -22,6 +22,7 @@ use zenoh_protocol::network::{
     Interest,
 };
 use zenoh_sync::get_mut_unchecked;
+use zenoh_runtime::ZRuntime;
 
 use super::Hat;
 use crate::net::routing::{

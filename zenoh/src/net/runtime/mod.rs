@@ -175,7 +175,7 @@ pub(crate) struct RuntimeState {
     #[cfg(feature = "plugins")]
     plugins_manager: Mutex<PluginsManager>,
     start_conditions: Arc<StartConditions>,
-    pending_connections: tokio::sync::Mutex<HashSet<ZenohIdProto>>,
+    pending_connections: async_lock::Mutex<HashSet<ZenohIdProto>>,
     namespace: Option<OwnedNonWildKeyExpr>,
     #[cfg(feature = "stats")]
     stats: zenoh_stats::StatsRegistry,
@@ -772,7 +772,7 @@ impl RuntimeBuilder {
                 #[cfg(feature = "plugins")]
                 plugins_manager: Mutex::new(plugins_manager),
                 start_conditions: Arc::new(StartConditions::default()),
-                pending_connections: tokio::sync::Mutex::new(HashSet::new()),
+                pending_connections: async_lock::Mutex::new(HashSet::new()),
                 namespace,
                 #[cfg(feature = "stats")]
                 stats,

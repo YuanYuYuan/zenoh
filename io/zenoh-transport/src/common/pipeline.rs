@@ -1495,7 +1495,7 @@ mod tests {
                 println!("{} bytes: {:.6} Gbps", current, 2.0 * thr);
             }
             prev_size = current;
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            async_io::Timer::after(Duration::from_millis(500)).await;
         }
     }
 

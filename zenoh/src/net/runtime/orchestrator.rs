@@ -247,7 +247,7 @@ impl Runtime {
 
         if wait_scouting
             && (scouting || !peers.is_empty())
-            && tokio::time::timeout(delay, self.state.start_conditions.notified())
+            && async_std::future::timeout(delay, self.state.start_conditions.notified())
                 .await
                 .is_err()
             && !peers.is_empty()
@@ -290,7 +290,7 @@ impl Runtime {
             self.start_scout(listen, autoconnect, addr, ifaces).await?;
         }
 
-        tokio::time::sleep(delay).await;
+        async_io::Timer::after(delay).await;
         Ok(())
     }
 
@@ -350,7 +350,7 @@ impl Runtime {
         if timeout.is_zero() {
             self.connect_peers_impl(peers, single_link).await
         } else {
-            let res = tokio::time::timeout(timeout, async {
+            let res = async_std::future::timeout(timeout, async {
                 self.connect_peers_impl(peers, single_link).await
             })
             .await;
@@ -508,7 +508,7 @@ impl Runtime {
         if timeout.is_zero() {
             self.bind_listeners_impl(listeners).await
         } else {
-            let res = tokio::time::timeout(timeout, async {
+            let res = async_std::future::timeout(timeout, async {
                 self.bind_listeners_impl(listeners).await.ok()
             })
             .await;
@@ -568,7 +568,7 @@ impl Runtime {
             if self.add_listener(listener.clone()).await.is_ok() {
                 break;
             }
-            tokio::time::sleep(period.next_duration()).await;
+            async_io::Timer::after(period.next_duration()).await;
         }
     }
 
@@ -800,7 +800,7 @@ impl Runtime {
             cancellation_token: CancellationToken,
         ) -> Option<(EndPoint, ConnectionRetryPeriod)> {
             tokio::select! {
-                _ = tokio::time::sleep(wait_time) => {
+                _ = async_io::Timer::after(wait_time) => {
                     Some((peer, period))
                 }
                 _ = cancellation_token.cancelled() => {
@@ -938,7 +938,7 @@ impl Runtime {
                         );
                     }
                 }
-                tokio::time::sleep(delay).await;
+                async_io::Timer::after(delay).await;
                 if delay * SCOUT_PERIOD_INCREASE_FACTOR <= SCOUT_MAX_PERIOD {
                     delay *= SCOUT_PERIOD_INCREASE_FACTOR;
                 }
@@ -1147,7 +1147,7 @@ impl Runtime {
             Ok(())
         };
         let timeout = async {
-            tokio::time::sleep(timeout).await;
+            async_io::Timer::after(timeout).await;
             bail!("timeout")
         };
         tokio::select! {

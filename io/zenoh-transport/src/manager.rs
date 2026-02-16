@@ -14,7 +14,7 @@
 use std::{collections::HashMap, fmt, sync::Arc, time::Duration};
 
 use rand::{RngCore, SeedableRng};
-use tokio::sync::Mutex as AsyncMutex;
+use async_lock::Mutex as AsyncMutex;
 use zenoh_config::{ExpandedConfig, LinkRxConf, QueueAllocConf, QueueConf, QueueSizeConf};
 use zenoh_crypto::{BlockCipher, PseudoRng};
 use zenoh_link::{LinkKind, NewLinkChannelSender};

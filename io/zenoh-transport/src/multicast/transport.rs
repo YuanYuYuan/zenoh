@@ -392,11 +392,9 @@ impl TransportMulticastInner {
         let c_self = self.clone();
         let c_locator = locator.clone();
         let task = async move {
-            let mut interval =
-                tokio::time::interval_at(tokio::time::Instant::now() + join.lease, join.lease);
             loop {
                 tokio::select! {
-                    _ = interval.tick() => {
+                    _ = async_io::Timer::after(join.lease) => {
                         if !c_is_active.swap(false, Ordering::AcqRel) {
                             break
                         }

@@ -21,6 +21,7 @@ use zenoh_protocol::{
     zenoh::{self, ResponseBody},
 };
 use zenoh_result::ZResult;
+use zenoh_runtime::ZRuntime;
 
 #[zenoh_macros::unstable]
 use crate::api::sample::SourceInfo;
@@ -275,7 +276,7 @@ impl Wait for ReplyErrBuilder<'_> {
         let qos = self.query.inner.qos;
         let encoding = self.encoding;
         let payload = self.payload;
-        tokio::spawn(async move {
+        ZRuntime::Application.spawn(async move {
             primitives.send_response(Response {
                 rid: qid,
                 wire_expr: WireExpr {

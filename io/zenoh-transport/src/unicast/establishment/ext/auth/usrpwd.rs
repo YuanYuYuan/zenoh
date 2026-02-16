@@ -15,7 +15,7 @@ use std::{collections::HashMap, fmt};
 
 use async_trait::async_trait;
 use rand::{CryptoRng, Rng};
-use tokio::sync::RwLock;
+use async_lock::RwLock;
 use zenoh_buffers::{
     reader::{DidntRead, HasReader, Reader},
     writer::{DidntWrite, HasWriter, Writer},
