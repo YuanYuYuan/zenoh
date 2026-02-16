@@ -41,8 +41,8 @@ fn keyexpr_test_new() {
     assert_eq!(expr.as_str(), "expr");
 }
 
-#[test]
-fn keyexpr_test_into_owned_borrowing_clone() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn keyexpr_test_into_owned_borrowing_clone() {
     let expr = KeyExpr::try_from("expr").unwrap();
     let clone = expr.borrowing_clone();
     assert_eq!(expr, clone);
@@ -59,8 +59,8 @@ fn keyexpr_test_into_owned_borrowing_clone() {
     config.set_mode(Some(WhatAmI::Peer)).unwrap();
     config.listen.endpoints.set(vec![]).unwrap();
     config.scouting.multicast.set_enabled(Some(false)).unwrap();
-    let session = zenoh::open(config).wait().unwrap();
-    let expr = session.declare_keyexpr("expr").wait().unwrap();
+    let session = zenoh::open(config).await.unwrap();
+    let expr = session.declare_keyexpr("expr").await.unwrap();
     let clone = expr.borrowing_clone();
     assert_eq!(expr, clone);
 
@@ -72,7 +72,7 @@ fn keyexpr_test_into_owned_borrowing_clone() {
     let clone = expr.borrowing_clone();
     assert_eq!(expr, clone);
 
-    session.close().wait().unwrap();
+    session.close().await.unwrap();
 }
 
 #[test]
@@ -81,8 +81,8 @@ fn keyexpr_test_autocannonize() {
     assert_eq!(expr.as_str(), "some/expr/**");
 }
 
-#[test]
-fn keyexpr_test_join() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn keyexpr_test_join() {
     let prefix = KeyExpr::try_from("some/prefix").unwrap();
     let suffix = KeyExpr::try_from("some/suffix").unwrap();
     let join = prefix.join(&suffix).unwrap();
@@ -92,9 +92,9 @@ fn keyexpr_test_join() {
     config.set_mode(Some(WhatAmI::Peer)).unwrap();
     config.listen.endpoints.set(vec![]).unwrap();
     config.scouting.multicast.set_enabled(Some(false)).unwrap();
-    let session = zenoh::open(config).wait().unwrap();
-    let wire_prefix = session.declare_keyexpr("some/prefix").wait().unwrap();
-    let wire_suffix = session.declare_keyexpr("some/suffix").wait().unwrap();
+    let session = zenoh::open(config).await.unwrap();
+    let wire_prefix = session.declare_keyexpr("some/prefix").await.unwrap();
+    let wire_suffix = session.declare_keyexpr("some/suffix").await.unwrap();
     let join = wire_prefix.join(&wire_suffix).unwrap();
     assert_eq!(join.as_str(), "some/prefix/some/suffix");
 
@@ -117,8 +117,8 @@ fn keyexpr_test_join() {
     assert_eq!(join.as_str(), "some/prefix/some/suffix");
 }
 
-#[test]
-fn keyexpr_test_concat() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn keyexpr_test_concat() {
     let prefix = KeyExpr::try_from("some/prefix").unwrap();
     let suffix = KeyExpr::try_from("some/suffix").unwrap();
     let concat = prefix.concat(&suffix).unwrap();
@@ -128,9 +128,9 @@ fn keyexpr_test_concat() {
     config.set_mode(Some(WhatAmI::Peer)).unwrap();
     config.listen.endpoints.set(vec![]).unwrap();
     config.scouting.multicast.set_enabled(Some(false)).unwrap();
-    let session = zenoh::open(config).wait().unwrap();
-    let wire_prefix = session.declare_keyexpr("some/prefix").wait().unwrap();
-    let wire_suffix = session.declare_keyexpr("some/suffix").wait().unwrap();
+    let session = zenoh::open(config).await.unwrap();
+    let wire_prefix = session.declare_keyexpr("some/prefix").await.unwrap();
+    let wire_suffix = session.declare_keyexpr("some/suffix").await.unwrap();
     let concat = wire_prefix.concat(&wire_suffix).unwrap();
     assert_eq!(concat.as_str(), "some/prefixsome/suffix");
 
@@ -204,8 +204,8 @@ fn keyexpr_test_debug() {
     assert_eq!(format!("{expr:?}"), "ke`expr`");
 }
 
-#[test]
-fn keyexpr_test_div() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn keyexpr_test_div() {
     let suffix = KeyExpr::try_from("suffix").unwrap();
 
     let prefix = KeyExpr::try_from("prefix").unwrap();
@@ -232,9 +232,9 @@ fn keyexpr_test_div() {
     config.set_mode(Some(WhatAmI::Peer)).unwrap();
     config.listen.endpoints.set(vec![]).unwrap();
     config.scouting.multicast.set_enabled(Some(false)).unwrap();
-    let session = zenoh::open(config).wait().unwrap();
+    let session = zenoh::open(config).await.unwrap();
 
-    let wire_prefix = session.declare_keyexpr("prefix").wait().unwrap();
+    let wire_prefix = session.declare_keyexpr("prefix").await.unwrap();
     assert_eq!(
         &wire_prefix / &suffix,
         KeyExpr::try_from("prefix/suffix").unwrap()
@@ -246,7 +246,7 @@ fn keyexpr_test_div() {
 
     let wire_prefix = session
         .declare_keyexpr("prefix")
-        .wait()
+        .await
         .unwrap()
         .into_owned();
     assert_eq!(
@@ -258,42 +258,42 @@ fn keyexpr_test_div() {
         KeyExpr::try_from("prefix/suffix").unwrap()
     );
 
-    session.close().wait().unwrap();
+    session.close().await.unwrap();
 }
 
-#[test]
-fn keyexpr_test_undeclare() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn keyexpr_test_undeclare() {
     let expr = KeyExpr::try_from("expr").unwrap();
 
     let mut config = zenoh_config::Config::default();
     config.set_mode(Some(WhatAmI::Peer)).unwrap();
     config.listen.endpoints.set(vec![]).unwrap();
     config.scouting.multicast.set_enabled(Some(false)).unwrap();
-    let session = zenoh::open(config.clone()).wait().unwrap();
-    let session2 = zenoh::open(config).wait().unwrap();
-    let wire_expr = session.declare_keyexpr("expr").wait().unwrap();
-    let owned_wire_expr = session.declare_keyexpr("expr").wait().unwrap().into_owned();
+    let session = zenoh::open(config.clone()).await.unwrap();
+    let session2 = zenoh::open(config).await.unwrap();
+    let wire_expr = session.declare_keyexpr("expr").await.unwrap();
+    let owned_wire_expr = session.declare_keyexpr("expr").await.unwrap().into_owned();
 
     let wire_expr2 = wire_expr.clone();
     let wire_expr3 = wire_expr.clone();
-    assert!(session2.undeclare(wire_expr2).wait().is_err());
+    assert!(session2.undeclare(wire_expr2).await.is_err());
 
-    assert!(session.undeclare(wire_expr).wait().is_ok());
-    assert!(session.undeclare(wire_expr3).wait().is_ok());
+    assert!(session.undeclare(wire_expr).await.is_ok());
+    assert!(session.undeclare(wire_expr3).await.is_ok());
 
-    assert!(session.undeclare(owned_wire_expr).wait().is_ok());
-    assert!(session.undeclare(expr).wait().is_err());
+    assert!(session.undeclare(owned_wire_expr).await.is_ok());
+    assert!(session.undeclare(expr).await.is_err());
 
     // let mut config = zenoh::Config::default();
     // config.set_mode(Some(WhatAmI::Peer)).unwrap();
     // config.listen.endpoints.set(vec![]).unwrap();
     // config.scouting.multicast.set_enabled(Some(false)).unwrap();
-    // let session2 = zenoh::open(config).wait().unwrap();
-    // let wire_expr2 = session2.declare_keyexpr("expr").wait().unwrap();
-    // assert!(session.undeclare(wire_expr2).wait().is_err());
-    // session2.close().wait().unwrap();
+    // let session2 = zenoh::open(config).await.unwrap();
+    // let wire_expr2 = session2.declare_keyexpr("expr").await.unwrap();
+    // assert!(session.undeclare(wire_expr2).await.is_err());
+    // session2.close().await.unwrap();
 
-    session.close().wait().unwrap();
+    session.close().await.unwrap();
 }
 
 #[test]

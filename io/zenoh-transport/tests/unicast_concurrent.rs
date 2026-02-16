@@ -194,7 +194,7 @@ async fn transport_concurrent(endpoint01: Vec<EndPoint>, endpoint02: Vec<EndPoin
 
         for i in 0..MSG_COUNT {
             println!("[Transport Peer 01g] Scheduling message {i}");
-            s02.schedule(message.clone().as_mut()).unwrap();
+            s02.schedule(message.clone().as_mut()).await.unwrap();
         }
         println!("[Transport Peer 01g] => Scheduling OK");
 
@@ -283,7 +283,7 @@ async fn transport_concurrent(endpoint01: Vec<EndPoint>, endpoint02: Vec<EndPoin
 
         for i in 0..MSG_COUNT {
             println!("[Transport Peer 02g] Scheduling message {i}");
-            s01.schedule(message.clone().as_mut()).unwrap();
+            s01.schedule(message.clone().as_mut()).await.unwrap();
         }
         println!("[Transport Peer 02g] => Scheduling OK");
 

@@ -74,11 +74,14 @@ mod tests {
                 ..Push::from(vec![0u8; MSG_SIZE])
             });
 
-            println!("[Simultaneous {}] Sending {}...", self.zid, MSG_COUNT);
-            for _ in 0..MSG_COUNT {
-                transport.schedule(message.clone().as_mut()).unwrap();
-            }
-            println!("[Simultaneous {}] ... sent {}", self.zid, MSG_COUNT);
+            let zid = self.zid;
+            tokio::task::spawn(async move {
+                println!("[Simultaneous {}] Sending {}...", zid, MSG_COUNT);
+                for _ in 0..MSG_COUNT {
+                    transport.schedule(message.clone().as_mut()).await.unwrap();
+                }
+                println!("[Simultaneous {}] ... sent {}", zid, MSG_COUNT);
+            });
 
             let mh = Arc::new(MHPeer::new(self.count.clone()));
             Ok(mh)

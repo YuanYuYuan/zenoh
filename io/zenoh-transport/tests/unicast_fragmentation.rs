@@ -270,7 +270,7 @@ async fn test_transport(router_handler: Arc<SHRouter>, client_transport: Transpo
     ztimeout!(async {
         let mut sent = 0;
         while router_handler.get_count() < MSG_COUNT {
-            if client_transport.schedule(MSG.clone().as_mut()).is_ok() {
+            if client_transport.schedule(MSG.clone().as_mut()).await.is_ok() {
                 sent += 1;
                 println!(
                     "Sent: {sent}. Received: {}/{MSG_COUNT}",

@@ -248,7 +248,7 @@ mod tests {
                 })
             });
 
-            peer_shm02_transport.schedule(message.as_mut()).unwrap();
+            peer_shm02_transport.schedule(message.as_mut()).await.unwrap();
         }
 
         // Wait a little bit
@@ -280,7 +280,7 @@ mod tests {
                 })
             });
 
-            peer_net01_transport.schedule(message.as_mut()).unwrap();
+            peer_net01_transport.schedule(message.as_mut()).await.unwrap();
         }
 
         // Wait a little bit

@@ -317,7 +317,7 @@ async fn transport_intermittent(endpoint: &EndPoint, lowlatency_transport: bool)
                             assert_eq!(ll.len(), 1);
                         }
                     }
-                    let res = s.schedule(message.clone().as_mut());
+                    let res = s.schedule(message.clone().as_mut()).await;
                     if res.is_err() {
                         print!("X");
                         std::io::stdout().flush().unwrap();

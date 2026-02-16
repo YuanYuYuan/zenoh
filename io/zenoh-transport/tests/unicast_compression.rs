@@ -279,7 +279,7 @@ mod tests {
             ..Push::from(vec![0u8; msg_size])
         });
         for _ in 0..MSG_COUNT {
-            let _ = client_transport.schedule(message.clone().as_mut());
+            let _ = client_transport.schedule(message.clone().as_mut()).await;
         }
 
         match channel.reliability {

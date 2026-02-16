@@ -503,7 +503,7 @@ async fn test_transport(
     });
 
     for _ in 0..msg_count {
-        let _ = client_transport.schedule(message.clone().as_mut());
+        let _ = client_transport.schedule(message.clone().as_mut()).await;
     }
 
     ztimeout!(async {

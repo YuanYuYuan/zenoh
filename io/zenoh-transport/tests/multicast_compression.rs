@@ -264,7 +264,7 @@ mod tests {
 
         println!("Sending {MSG_COUNT} messages... {channel:?} {msg_size}");
         for _ in 0..MSG_COUNT {
-            peer01.transport.schedule(message.as_mut()).unwrap();
+            peer01.transport.schedule(message.as_mut()).await.unwrap();
         }
 
         match channel.reliability {
