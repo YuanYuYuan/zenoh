@@ -676,8 +676,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn sample_kind_integrity_in_publication() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sample_kind_integrity_in_publication() {
         use crate::api::session::open;
 
         const KEY_EXPR: &str = "test/sample_kind_integrity/publication";
@@ -704,8 +704,8 @@ mod tests {
         sample_kind_integrity_in_publication_with(SampleKind::Delete);
     }
 
-    #[test]
-    fn sample_kind_integrity_in_put_builder() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sample_kind_integrity_in_put_builder() {
         use crate::api::session::open;
 
         const KEY_EXPR: &str = "test/sample_kind_integrity/put_builder";
