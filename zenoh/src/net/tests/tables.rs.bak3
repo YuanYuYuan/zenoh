@@ -174,8 +174,7 @@ async fn match_test() {
             &mut face.upgrade().unwrap(),
             i.try_into().unwrap(),
             &(*key_expr).into(),
-        )
-        .await;
+        );
     }
 
     for key_expr1 in key_exprs.iter() {
@@ -242,9 +241,6 @@ async fn multisub_test() {
         },
     )
     .await;
-    for (p, msg) in declares {
-        let _ = p.send_declare(msg).await;
-    }
     assert!(res.upgrade().is_some());
 
     let mut declares = vec![];
@@ -260,9 +256,6 @@ async fn multisub_test() {
         },
     )
     .await;
-    for (p, msg) in declares {
-        let _ = p.send_declare(msg).await;
-    }
     assert!(res.upgrade().is_some());
 
     let mut declares = vec![];
@@ -278,9 +271,6 @@ async fn multisub_test() {
         },
     )
     .await;
-    for (p, msg) in declares {
-        let _ = p.send_declare(msg).await;
-    }
     assert!(res.upgrade().is_none());
 
     face0.close().await;
@@ -307,8 +297,7 @@ async fn clean_test() {
         &mut face0.state.clone(),
         2,
         &"todrop1/todrop11".into(),
-    )
-    .await;
+    );
     let optres2 = Resource::get_resource(zasyncread!(tables.tables)._get_root(), "todrop1/todrop11")
         .map(|res| Arc::downgrade(&res));
     assert!(optres2.is_some());
@@ -361,9 +350,6 @@ async fn clean_test() {
         },
     )
     .await;
-    for (p, msg) in declares {
-        let _ = p.send_declare(msg).await;
-    }
     let optres2 = Resource::get_resource(zasyncread!(tables.tables)._get_root(), "todrop1/todrop11")
         .map(|res| Arc::downgrade(&res));
     assert!(optres2.is_some());
@@ -384,9 +370,6 @@ async fn clean_test() {
         },
     )
     .await;
-    for (p, msg) in declares {
-        let _ = p.send_declare(msg).await;
-    }
     let optres3 = Resource::get_resource(zasyncread!(tables.tables)._get_root(), "todrop1/todrop12")
         .map(|res| Arc::downgrade(&res));
     assert!(optres3.is_some());
@@ -407,9 +390,6 @@ async fn clean_test() {
         },
     )
     .await;
-    for (p, msg) in declares {
-        let _ = p.send_declare(msg).await;
-    }
 
     println!("COUNT2: {}", res3.strong_count());
 
@@ -430,9 +410,6 @@ async fn clean_test() {
         },
     )
     .await;
-    for (p, msg) in declares {
-        let _ = p.send_declare(msg).await;
-    }
     assert!(res1.upgrade().is_some());
     assert!(res2.upgrade().is_none());
     assert!(res3.upgrade().is_none());
@@ -458,9 +435,6 @@ async fn clean_test() {
         },
     )
     .await;
-    for (p, msg) in declares {
-        let _ = p.send_declare(msg).await;
-    }
     let optres1 = Resource::get_resource(zasyncread!(tables.tables)._get_root(), "todrop3")
         .map(|res| Arc::downgrade(&res));
     assert!(optres1.is_some());
@@ -480,9 +454,6 @@ async fn clean_test() {
         },
     )
     .await;
-    for (p, msg) in declares {
-        let _ = p.send_declare(msg).await;
-    }
     assert!(res1.upgrade().is_some());
 
     unregister_expr(&tables, &mut face0.state.clone(), 2).await;
@@ -506,9 +477,6 @@ async fn clean_test() {
         },
     )
     .await;
-    for (p, msg) in declares {
-        let _ = p.send_declare(msg).await;
-    }
     let mut declares = vec![];
     declare_subscription(
         tables.hat_code.as_ref(),
@@ -523,9 +491,6 @@ async fn clean_test() {
         },
     )
     .await;
-    for (p, msg) in declares {
-        let _ = p.send_declare(msg).await;
-    }
     declare_token(
         tables.hat_code.as_ref(),
         &tables,

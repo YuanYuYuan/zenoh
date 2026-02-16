@@ -174,8 +174,7 @@ async fn match_test() {
             &mut face.upgrade().unwrap(),
             i.try_into().unwrap(),
             &(*key_expr).into(),
-        )
-        .await;
+        );
     }
 
     for key_expr1 in key_exprs.iter() {
@@ -228,7 +227,6 @@ async fn multisub_test() {
     let res = optres.unwrap();
     assert!(res.upgrade().is_some());
 
-    let mut declares = vec![];
     declare_subscription(
         tables.hat_code.as_ref(),
         &tables,
@@ -242,12 +240,8 @@ async fn multisub_test() {
         },
     )
     .await;
-    for (p, msg) in declares {
-        let _ = p.send_declare(msg).await;
-    }
     assert!(res.upgrade().is_some());
 
-    let mut declares = vec![];
     undeclare_subscription(
         tables.hat_code.as_ref(),
         &tables,
@@ -260,12 +254,8 @@ async fn multisub_test() {
         },
     )
     .await;
-    for (p, msg) in declares {
-        let _ = p.send_declare(msg).await;
-    }
     assert!(res.upgrade().is_some());
 
-    let mut declares = vec![];
     undeclare_subscription(
         tables.hat_code.as_ref(),
         &tables,
@@ -278,9 +268,6 @@ async fn multisub_test() {
         },
     )
     .await;
-    for (p, msg) in declares {
-        let _ = p.send_declare(msg).await;
-    }
     assert!(res.upgrade().is_none());
 
     face0.close().await;
@@ -307,8 +294,7 @@ async fn clean_test() {
         &mut face0.state.clone(),
         2,
         &"todrop1/todrop11".into(),
-    )
-    .await;
+    );
     let optres2 = Resource::get_resource(zasyncread!(tables.tables)._get_root(), "todrop1/todrop11")
         .map(|res| Arc::downgrade(&res));
     assert!(optres2.is_some());
@@ -347,7 +333,6 @@ async fn clean_test() {
 
     let sub_info = SubscriberInfo;
 
-    let mut declares = vec![];
     declare_subscription(
         tables.hat_code.as_ref(),
         &tables,
@@ -361,16 +346,12 @@ async fn clean_test() {
         },
     )
     .await;
-    for (p, msg) in declares {
-        let _ = p.send_declare(msg).await;
-    }
     let optres2 = Resource::get_resource(zasyncread!(tables.tables)._get_root(), "todrop1/todrop11")
         .map(|res| Arc::downgrade(&res));
     assert!(optres2.is_some());
     let res2 = optres2.unwrap();
     assert!(res2.upgrade().is_some());
 
-    let mut declares = vec![];
     declare_subscription(
         tables.hat_code.as_ref(),
         &tables,
@@ -384,9 +365,6 @@ async fn clean_test() {
         },
     )
     .await;
-    for (p, msg) in declares {
-        let _ = p.send_declare(msg).await;
-    }
     let optres3 = Resource::get_resource(zasyncread!(tables.tables)._get_root(), "todrop1/todrop12")
         .map(|res| Arc::downgrade(&res));
     assert!(optres3.is_some());
@@ -394,7 +372,6 @@ async fn clean_test() {
     println!("COUNT: {}", res3.strong_count());
     assert!(res3.upgrade().is_some());
 
-    let mut declares = vec![];
     undeclare_subscription(
         tables.hat_code.as_ref(),
         &tables,
@@ -407,9 +384,6 @@ async fn clean_test() {
         },
     )
     .await;
-    for (p, msg) in declares {
-        let _ = p.send_declare(msg).await;
-    }
 
     println!("COUNT2: {}", res3.strong_count());
 
@@ -417,7 +391,6 @@ async fn clean_test() {
     assert!(res2.upgrade().is_some());
     assert!(res3.upgrade().is_none());
 
-    let mut declares = vec![];
     undeclare_subscription(
         tables.hat_code.as_ref(),
         &tables,
@@ -430,9 +403,6 @@ async fn clean_test() {
         },
     )
     .await;
-    for (p, msg) in declares {
-        let _ = p.send_declare(msg).await;
-    }
     assert!(res1.upgrade().is_some());
     assert!(res2.upgrade().is_none());
     assert!(res3.upgrade().is_none());
@@ -444,7 +414,6 @@ async fn clean_test() {
 
     // --------------
     register_expr(&tables, &mut face0.state.clone(), 2, &"todrop3".into()).await;
-    let mut declares = vec![];
     declare_subscription(
         tables.hat_code.as_ref(),
         &tables,
@@ -458,16 +427,12 @@ async fn clean_test() {
         },
     )
     .await;
-    for (p, msg) in declares {
-        let _ = p.send_declare(msg).await;
-    }
     let optres1 = Resource::get_resource(zasyncread!(tables.tables)._get_root(), "todrop3")
         .map(|res| Arc::downgrade(&res));
     assert!(optres1.is_some());
     let res1 = optres1.unwrap();
     assert!(res1.upgrade().is_some());
 
-    let mut declares = vec![];
     undeclare_subscription(
         tables.hat_code.as_ref(),
         &tables,
@@ -480,9 +445,6 @@ async fn clean_test() {
         },
     )
     .await;
-    for (p, msg) in declares {
-        let _ = p.send_declare(msg).await;
-    }
     assert!(res1.upgrade().is_some());
 
     unregister_expr(&tables, &mut face0.state.clone(), 2).await;
@@ -492,7 +454,6 @@ async fn clean_test() {
     register_expr(&tables, &mut face0.state.clone(), 3, &"todrop4".into()).await;
     register_expr(&tables, &mut face0.state.clone(), 4, &"todrop5".into()).await;
     register_expr(&tables, &mut face0.state.clone(), 5, &"todrop6".into()).await;
-    let mut declares = vec![];
     declare_subscription(
         tables.hat_code.as_ref(),
         &tables,
@@ -506,10 +467,6 @@ async fn clean_test() {
         },
     )
     .await;
-    for (p, msg) in declares {
-        let _ = p.send_declare(msg).await;
-    }
-    let mut declares = vec![];
     declare_subscription(
         tables.hat_code.as_ref(),
         &tables,
@@ -523,9 +480,6 @@ async fn clean_test() {
         },
     )
     .await;
-    for (p, msg) in declares {
-        let _ = p.send_declare(msg).await;
-    }
     declare_token(
         tables.hat_code.as_ref(),
         &tables,
@@ -884,7 +838,6 @@ async fn client_test() {
             }),
         },
     );
-    let mut declares = vec![];
     declare_subscription(
         tables.hat_code.as_ref(),
         &tables,
@@ -898,9 +851,6 @@ async fn client_test() {
         },
     )
     .await;
-    for (p, msg) in declares {
-        let _ = p.send_declare(msg).await;
-    }
     register_expr(
         &tables,
         &mut face0.upgrade().unwrap(),
@@ -1000,7 +950,6 @@ async fn client_test() {
             }),
         },
     );
-    let mut declares = vec![];
     declare_subscription(
         tables.hat_code.as_ref(),
         &tables,
@@ -1014,9 +963,6 @@ async fn client_test() {
         },
     )
     .await;
-    for (p, msg) in declares {
-        let _ = p.send_declare(msg).await;
-    }
 
     primitives0.clear_data();
     primitives1.clear_data();
