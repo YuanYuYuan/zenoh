@@ -70,20 +70,23 @@ async fn base_test() {
 
     let sub_info = SubscriberInfo;
 
-    face.declare_subscriber(
+    let mut declares = vec![];
+    declare_subscription(
+        tables.hat_code.as_ref(),
+        &tables,
+        &mut face.state.clone(),
         0,
         &WireExpr::from(1).with_suffix("four/five"),
         &sub_info,
         NodeId::default(),
         &mut |p, m| {
-            let p = p.clone();
-            let msg = m.msg.clone();
-            tokio::spawn(async move {
-                let _ = p.send_declare(msg).await;
-            });
+            declares.push((p.clone(), m.msg.clone()));
         },
     )
     .await;
+    for (p, msg) in declares {
+        let _ = p.send_declare(msg).await;
+    }
 
     TablesData::print(&zasyncread!(tables.tables).data);
 }
@@ -893,20 +896,23 @@ async fn client_test() {
             }),
         },
     );
-    face1.declare_subscriber(
+    let mut declares = vec![];
+    declare_subscription(
+        tables.hat_code.as_ref(),
+        &tables,
+        &mut face1.state.clone(),
         0,
         &WireExpr::from(21).with_suffix("/**"),
         &sub_info,
         NodeId::default(),
         &mut |p, m| {
-            let p = p.clone();
-            let msg = m.msg.clone();
-            tokio::spawn(async move {
-                let _ = p.send_declare(msg).await;
-            });
+            declares.push((p.clone(), m.msg.clone()));
         },
     )
     .await;
+    for (p, msg) in declares {
+        let _ = p.send_declare(msg).await;
+    }
     register_expr(
         &tables,
         &mut face1.state.clone(),
@@ -962,20 +968,24 @@ async fn client_test() {
     primitives1.clear_data();
     primitives2.clear_data();
 
-    let route_dummy_data = |face: &Arc<FaceState>, wire_expr| {
-        route_data(
-            &tables,
-            face,
-            &mut Push {
-                wire_expr,
-                ..Put::default().into()
-            },
-            Reliability::Reliable,
-            true,
-        );
+    let route_dummy_data = |face: Arc<FaceState>, wire_expr: WireExpr| {
+        let tables = tables.clone();
+        Box::pin(async move {
+            route_data(
+                &tables,
+                &face,
+                &mut Push {
+                    wire_expr,
+                    ..Put::default().into()
+                },
+                Reliability::Reliable,
+                true,
+            ).await;
+        })
     };
 
-    route_dummy_data(&face0.state, "test/client/z1_wr1".into());
+    route_dummy_data(face0.state.clone(), "test/client/z1_wr1".into()).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     // functional check
     assert!(primitives1.get_last_name().is_some());
@@ -992,7 +1002,8 @@ async fn client_test() {
     primitives0.clear_data();
     primitives1.clear_data();
     primitives2.clear_data();
-    route_dummy_data(&face0.state, WireExpr::from(11).with_suffix("/z1_wr2"));
+    route_dummy_data(face0.state.clone(), WireExpr::from(11).with_suffix("/z1_wr2")).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     // functional check
     assert!(primitives1.get_last_name().is_some());
@@ -1009,7 +1020,8 @@ async fn client_test() {
     primitives0.clear_data();
     primitives1.clear_data();
     primitives2.clear_data();
-    route_dummy_data(&face1.state, "test/client/**".into());
+    route_dummy_data(face1.state.clone(), "test/client/**".into()).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     // functional check
     assert!(primitives0.get_last_name().is_some());
@@ -1026,7 +1038,8 @@ async fn client_test() {
     primitives0.clear_data();
     primitives1.clear_data();
     primitives2.clear_data();
-    route_dummy_data(&face0.state, 12.into());
+    route_dummy_data(face0.state.clone(), 12.into()).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     // functional check
     assert!(primitives1.get_last_name().is_some());
@@ -1043,7 +1056,8 @@ async fn client_test() {
     primitives0.clear_data();
     primitives1.clear_data();
     primitives2.clear_data();
-    route_dummy_data(&face1.state, 22.into());
+    route_dummy_data(face1.state.clone(), 22.into()).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     // functional check
     assert!(primitives0.get_last_name().is_some());
