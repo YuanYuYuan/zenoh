@@ -16,6 +16,7 @@ mod mux;
 
 use std::any::Any;
 
+use async_trait::async_trait;
 pub use demux::*;
 pub use mux::*;
 use zenoh_protocol::{
@@ -25,95 +26,68 @@ use zenoh_protocol::{
 
 use super::routing::RoutingContext;
 
+/// Unified async Primitives trait that consolidates the former Primitives and EPrimitives traits.
+/// All methods are async and take owned messages to enable parallel sends.
+#[async_trait]
 pub trait Primitives: Send + Sync {
-    fn send_interest(&self, msg: &mut Interest);
+    /// Send an interest message
+    async fn send_interest(&self, msg: Interest) -> bool;
 
-    fn send_declare(&self, msg: &mut Declare);
+    /// Send a declare message
+    async fn send_declare(&self, msg: Declare) -> bool;
 
-    fn send_push_consume(&self, msg: &mut Push, reliability: Reliability, consume: bool);
+    /// Send a push message with specified reliability
+    async fn send_push(&self, msg: Push, reliability: Reliability) -> bool;
 
-    #[inline(always)]
-    fn send_push(&self, msg: &mut Push, reliability: Reliability) {
-        self.send_push_consume(msg, reliability, true)
-    }
+    /// Send a request message
+    async fn send_request(&self, msg: Request) -> bool;
 
-    fn send_request(&self, msg: &mut Request);
+    /// Send a response message
+    async fn send_response(&self, msg: Response) -> bool;
 
-    fn send_response(&self, msg: &mut Response);
+    /// Send a response final message
+    async fn send_response_final(&self, msg: ResponseFinal) -> bool;
 
-    fn send_response_final(&self, msg: &mut ResponseFinal);
+    /// Close the primitives
+    async fn close(&self);
 
-    fn send_close(&self);
-
-    #[allow(dead_code)]
-    fn as_any(&self) -> &dyn Any;
-}
-
-pub(crate) trait EPrimitives: Send + Sync {
-    fn as_any(&self) -> &dyn Any;
-
-    fn send_interest(&self, ctx: RoutingContext<&mut Interest>) -> bool;
-
-    fn send_declare(&self, ctx: RoutingContext<&mut Declare>) -> bool;
-
-    fn send_push(&self, msg: &mut Push, reliability: Reliability) -> bool;
-
-    fn send_request(&self, msg: &mut Request) -> bool;
-
-    fn send_response(&self, msg: &mut Response) -> bool;
-
-    fn send_response_final(&self, msg: &mut ResponseFinal) -> bool;
+    /// Downcast support for accessing concrete types
+    fn as_any(&self) -> &dyn std::any::Any;
 }
 
 #[derive(Default)]
 pub struct DummyPrimitives;
 
+#[async_trait]
 impl Primitives for DummyPrimitives {
-    fn send_interest(&self, _msg: &mut Interest) {}
+    async fn send_interest(&self, _msg: Interest) -> bool {
+        false
+    }
 
-    fn send_declare(&self, _msg: &mut Declare) {}
+    async fn send_declare(&self, _msg: Declare) -> bool {
+        false
+    }
 
-    fn send_push_consume(&self, _msg: &mut Push, _reliability: Reliability, _consume: bool) {}
+    async fn send_push(&self, _msg: Push, _reliability: Reliability) -> bool {
+        false
+    }
 
-    fn send_request(&self, _msg: &mut Request) {}
+    async fn send_request(&self, _msg: Request) -> bool {
+        false
+    }
 
-    fn send_response(&self, _msg: &mut Response) {}
+    async fn send_response(&self, _msg: Response) -> bool {
+        false
+    }
 
-    fn send_response_final(&self, _msg: &mut ResponseFinal) {}
+    async fn send_response_final(&self, _msg: ResponseFinal) -> bool {
+        false
+    }
 
-    fn send_close(&self) {}
+    async fn close(&self) {}
 
-    fn as_any(&self) -> &dyn Any {
+    fn as_any(&self) -> &dyn std::any::Any {
         self
     }
 }
 
-impl EPrimitives for DummyPrimitives {
-    fn send_interest(&self, _ctx: RoutingContext<&mut Interest>) -> bool {
-        false
-    }
-
-    fn send_declare(&self, _ctx: RoutingContext<&mut Declare>) -> bool {
-        false
-    }
-
-    fn send_push(&self, _msg: &mut Push, _reliability: Reliability) -> bool {
-        false
-    }
-
-    fn send_request(&self, _msg: &mut Request) -> bool {
-        false
-    }
-
-    fn send_response(&self, _msg: &mut Response) -> bool {
-        false
-    }
-
-    fn send_response_final(&self, _msg: &mut ResponseFinal) -> bool {
-        false
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}

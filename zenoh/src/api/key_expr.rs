@@ -38,11 +38,11 @@ pub(crate) struct KeyExprWireDeclaration {
 }
 
 impl KeyExprWireDeclaration {
-    pub(crate) fn new(prefix: &str, session: &Session, force: bool) -> ZResult<Option<Self>> {
+    pub(crate) async fn new(prefix: &str, session: &Session, force: bool) -> ZResult<Option<Self>> {
         let prefix_len = prefix.len() as u32;
         Ok(session
             .declare_prefix(prefix, force)
-            .wait()?
+            .await?
             .map(|expr_id| Self {
                 expr_id,
                 prefix_len,
@@ -472,15 +472,15 @@ impl<'a> KeyExpr<'a> {
         }
     }
 
-    pub(crate) fn declare(mut self, session: &Session, force: bool) -> ZResult<Self> {
+    pub(crate) async fn declare(mut self, session: &Session, force: bool) -> ZResult<Self> {
         if !self.is_fully_optimized(session) {
             *self.declaration_mut() =
-                KeyExprWireDeclaration::new(self.as_str(), session, force)?.map(Arc::new);
+                KeyExprWireDeclaration::new(self.as_str(), session, force).await?.map(Arc::new);
         }
         Ok(self)
     }
 
-    pub(crate) fn declare_nonwild_prefix(
+    pub(crate) async fn declare_nonwild_prefix(
         mut self,
         session: &Session,
         force: bool,
@@ -489,7 +489,7 @@ impl<'a> KeyExpr<'a> {
             let ke = self.as_keyexpr();
             *self.declaration_mut() = match ke.get_nonwild_prefix() {
                 Some(prefix) => {
-                    KeyExprWireDeclaration::new(prefix.as_str(), session, force)?.map(Arc::new)
+                    KeyExprWireDeclaration::new(prefix.as_str(), session, force).await?.map(Arc::new)
                 }
                 None => None,
             }

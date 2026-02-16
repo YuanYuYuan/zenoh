@@ -1332,6 +1332,7 @@ impl Runtime {
 
     #[allow(dead_code)]
     pub(crate) fn update_network(&self) -> ZResult<()> {
+        use futures::executor::block_on;
         let router = self.router();
         let _ctrl_lock = zlock!(router.tables.ctrl_lock);
         let mut wtables = zwrite!(router.tables.tables);
@@ -1343,6 +1344,7 @@ impl Runtime {
     }
 
     pub(crate) fn get_links_info(&self) -> HashMap<ZenohIdProto, LinkInfo> {
+        use futures::executor::block_on;
         let router = self.router();
         let tables = zread!(router.tables.tables);
         tables

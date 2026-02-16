@@ -86,6 +86,8 @@ unstable = [
 [dependencies]
 ahash = { workspace = true, default-features = true }
 arc-swap = { workspace = true }
+async-channel = { workspace = true }
+async-lock = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
 const_format = { workspace = true }

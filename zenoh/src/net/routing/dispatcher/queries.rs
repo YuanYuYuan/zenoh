@@ -57,15 +57,83 @@ pub(crate) struct Query {
     src_qos: response::ext::QoSType,
 }
 
-impl Face {
-    #[tracing::instrument(
-        level = "debug",
-        skip(self, send_declare, qabl_info),
-        fields(
-            expr = %expr,
-            node_id = node_id_as_source(node_id),
-            complete = qabl_info.complete,
-            distance = qabl_info.distance,
+#[inline]
+pub(crate) fn get_matching_queryables(
+    hat_code: &(dyn HatTrait + Send + Sync),
+    tables: &Tables,
+    key_expr: &KeyExpr<'_>,
+    complete: bool,
+) -> HashMap<usize, Arc<FaceState>> {
+    hat_code.get_matching_queryables(tables, key_expr, complete)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn declare_queryable<'a>(
+    hat_code: &(dyn HatTrait + Send + Sync),
+    tables: &TablesLock,
+    face: &mut Arc<FaceState>,
+    id: QueryableId,
+    expr: &'a WireExpr<'a>,
+    qabl_info: &QueryableInfoType,
+    node_id: NodeId,
+    send_declare: &'a mut SendDeclare<'a>,
+) {
+    let rtables = zasyncread!(tables.tables);
+    match rtables
+        .get_mapping(face, &expr.scope, expr.mapping)
+        .cloned()
+    {
+        Some(mut prefix) => {
+            tracing::debug!(
+                "{} Declare queryable {} ({}{})",
+                face,
+                id,
+                prefix.expr(),
+                expr.suffix
+            );
+            let res = Resource::get_resource(&prefix, &expr.suffix);
+            let (mut res, mut wtables) =
+                if res.as_ref().map(|r| r.context.is_some()).unwrap_or(false) {
+                    drop(rtables);
+                    let wtables = zasyncwrite!(tables.tables);
+                    (res.unwrap(), wtables)
+                } else {
+                    let mut fullexpr = prefix.expr().to_string();
+                    fullexpr.push_str(expr.suffix.as_ref());
+                    let mut matches = keyexpr::new(fullexpr.as_str())
+                        .map(|ke| Resource::get_matches(&rtables, ke))
+                        .unwrap_or_default();
+                    drop(rtables);
+                    let mut wtables = zasyncwrite!(tables.tables);
+                    let mut res = Resource::make_resource(
+                        hat_code,
+                        &mut wtables,
+                        &mut prefix,
+                        expr.suffix.as_ref(),
+                    );
+                    matches.push(Arc::downgrade(&res));
+                    Resource::match_resource(&wtables, &mut res, matches);
+                    (res, wtables)
+                };
+
+            hat_code.declare_queryable(
+                &mut wtables,
+                face,
+                id,
+                &mut res,
+                qabl_info,
+                node_id,
+                send_declare,
+            );
+
+            disable_matches_query_routes(&mut wtables, &mut res);
+            drop(wtables);
+        }
+        None => tracing::error!(
+            "{} Declare queryable {} for unknown scope {}",
+            face,
+            id,
+            expr.scope
         ),
         ret
     )]
@@ -80,157 +148,30 @@ impl Face {
         self.with_mapped_expr(expr, |tables, mut res| {
             let region = self.state.region;
 
-            let mut ctx = DispatcherContext {
-                tables_lock: &self.tables,
-                tables: &mut tables.data,
-                src_face: &mut self.state.clone(),
-                send_declare,
-            };
-
-            tables.hats[region].register_queryable(
-                ctx.reborrow(),
-                id,
-                res.clone(),
-                node_id,
-                qabl_info,
-            );
-
-            tables.hats[region].disable_query_routes(&mut res);
-
-            for dst in tables.hats.regions().collect_vec() {
-                let other_info = tables
-                    .hats
-                    .values()
-                    .filter(|hat| hat.region() != dst)
-                    .flat_map(|hat| hat.remote_queryables_of(ctx.tables, &res))
-                    .reduce(merge_qabl_infos);
-
-                tables.hats[dst].propagate_queryable(ctx.reborrow(), res.clone(), other_info);
-            }
-        });
-    }
-
-    #[tracing::instrument(
-        level = "debug",
-        skip(self, send_declare),
-        fields(expr = %expr, node_id = node_id_as_source(node_id)),
-        ret
-    )]
-    pub(crate) fn undeclare_queryable(
-        &self,
-        id: QueryableId,
-        expr: &WireExpr,
-        node_id: NodeId,
-        send_declare: &mut SendDeclare,
-    ) {
-        self.with_mapped_nullable_expr(expr, /* make_if_unknown */ false, |tables, res| {
-            let region = self.state.region;
-
-            let mut ctx = DispatcherContext {
-                tables_lock: &self.tables,
-                tables: &mut tables.data,
-                src_face: &mut self.state.clone(),
-                send_declare,
-            };
-
-            match tables.hats[region].unregister_queryable(ctx.reborrow(), id, res.clone(), node_id)
-            {
-                UnregisterEntityResult::Noop => {} // ¯\_(ツ)_/¯
-                UnregisterEntityResult::InfoUpdate { mut res } => {
-                    tables.hats[region].disable_query_routes(&mut res);
-
-                    for dst in tables.hats.regions().collect_vec() {
-                        let other_info = tables
-                            .hats
-                            .values()
-                            .filter(|hat| hat.region() != dst)
-                            .filter_map(|hat| hat.remote_queryables_of(ctx.tables, &res))
-                            .reduce(merge_qabl_infos);
-
-                        tables.hats[dst].propagate_queryable(
-                            ctx.reborrow(),
-                            res.clone(),
-                            other_info,
-                        );
-                    }
-                }
-                UnregisterEntityResult::LastUnregistered { mut res } => {
-                    tables.hats[region].disable_query_routes(&mut res);
-
-                    let remainder = tables
-                        .hats
-                        .values()
-                        .filter_map(|hat| {
-                            (hat.region() != region)
-                                .then(|| hat.remote_queryables_of(ctx.tables, &res))
-                                .flatten()
-                                .map(|info| (hat.region(), info))
-                        })
-                        .collect_vec();
-
-                    match &*remainder {
-                        [] => {
-                            for hat in tables.hats.values_mut() {
-                                hat.unpropagate_queryable(ctx.reborrow(), res.clone());
-                            }
-                            Resource::clean(&mut res);
-                        }
-                        [(last_owner, _)] => tables.hats[last_owner]
-                            .unpropagate_last_non_owned_queryable(ctx, res.clone()),
-                        _ => {
-                            for hat in tables.hats.values_mut() {
-                                let other_info = remainder
-                                    .iter()
-                                    .filter_map(|(region, info)| {
-                                        (region != &hat.region()).then_some(*info)
-                                    })
-                                    .reduce(merge_qabl_infos);
-
-                                hat.propagate_queryable(ctx.reborrow(), res.clone(), other_info);
-                            }
-                        }
-                    }
-                }
-            }
-        });
-    }
-
-    pub fn route_query(&self, msg: &mut Request) {
-        let rtables = zread!(self.tables.tables);
-        match rtables
-            .data
-            .get_mapping(&self.state, &msg.wire_expr.scope, msg.wire_expr.mapping)
-        {
-            Some(prefix) => {
-                tracing::debug!(
-                    "{}:{} Route query for res {}{}",
-                    self.state,
-                    msg.id,
-                    prefix.expr(),
-                    msg.wire_expr.suffix.as_ref(),
-                );
-                let prefix = prefix.clone();
-                let expr = RoutingExpr::new(&prefix, msg.wire_expr.suffix.as_ref());
-
-                #[cfg(feature = "stats")]
-                let payload_observer =
-                    super::stats::PayloadObserver::new(msg, Some(&expr), &rtables);
-                #[cfg(feature = "stats")]
-                payload_observer.observe_payload(zenoh_stats::Rx, &self.state, msg);
-
-                let mut builder = RouteBuilder::<QueryDirection>::new();
-
-                let queries_lock = zwrite!(self.tables.queries_lock);
-
-                let query = Arc::new(Query {
-                    src_face: self.state.clone(),
-                    src_qid: msg.id,
-                    src_qos: msg.ext_qos,
-                });
-
-                let src_face = &self.state;
-
-                if !rtables.ingress_filter(src_face) {
+pub(crate) async fn undeclare_queryable<'a>(
+    hat_code: &(dyn HatTrait + Send + Sync),
+    tables: &TablesLock,
+    face: &mut Arc<FaceState>,
+    id: QueryableId,
+    expr: &'a WireExpr<'a>,
+    node_id: NodeId,
+    send_declare: &'a mut SendDeclare<'a>,
+) {
+    let res = if expr.is_empty() {
+        None
+    } else {
+        let rtables = zasyncread!(tables.tables);
+        match rtables.get_mapping(face, &expr.scope, expr.mapping) {
+            Some(prefix) => match Resource::get_resource(prefix, expr.suffix.as_ref()) {
+                Some(res) => Some(res),
+                None => {
+                    tracing::error!(
+                        "{} Undeclare unknown queryable {} ({}{})",
+                        face,
+                        id,
+                        prefix.expr(),
+                        expr.suffix
+                    );
                     return;
                 }
 
@@ -397,6 +338,18 @@ impl Face {
                 }
             }
         }
+    };
+    let mut wtables = zasyncwrite!(tables.tables);
+    if let Some(mut res) =
+        hat_code.undeclare_queryable(&mut wtables, face, id, res, node_id, send_declare)
+    {
+        tracing::debug!("{} Undeclare queryable {} ({})", face, id, res.expr());
+        disable_matches_query_routes(&mut wtables, &mut res);
+        Resource::clean(&mut res);
+        drop(wtables);
+    } else {
+        // NOTE: This is expected behavior if queryable declarations are denied with ingress ACL interceptor.
+        tracing::debug!("{} Undeclare unknown queryable {}", face, id);
     }
 }
 
@@ -482,7 +435,7 @@ impl Timed for QueryCleanup {
                     ext_respid,
                 },
             );
-            let queries_lock = zwrite!(self.tables.queries_lock);
+            let queries_lock = zasyncwrite!(self.tables.queries_lock);
             if let Some(query) = get_mut_unchecked(&mut face)
                 .pending_queries
                 .remove(&self.qid)
@@ -530,16 +483,137 @@ fn get_query_route(
     compute_route()
 }
 
-pub(crate) fn route_send_response(
+#[allow(clippy::too_many_arguments)]
+pub async fn route_query(tables_ref: &Arc<TablesLock>, face: &Arc<FaceState>, msg: &mut Request) {
+    let rtables = zasyncread!(tables_ref.tables);
+    match rtables.get_mapping(face, &msg.wire_expr.scope, msg.wire_expr.mapping) {
+        Some(prefix) => {
+            tracing::debug!(
+                "{}:{} Route query for res {}{}",
+                face,
+                msg.id,
+                prefix.expr(),
+                msg.wire_expr.suffix.as_ref(),
+            );
+            let prefix = prefix.clone();
+            let expr = RoutingExpr::new(&prefix, msg.wire_expr.suffix.as_ref());
+
+            #[cfg(feature = "stats")]
+            let payload_observer = super::stats::PayloadObserver::new(msg, Some(&expr), &rtables);
+            #[cfg(feature = "stats")]
+            payload_observer.observe_payload(zenoh_stats::Rx, face, msg);
+
+            if tables_ref.hat_code.ingress_filter(&rtables, face, &expr) {
+                let route = get_query_route(
+                    tables_ref.hat_code.as_ref(),
+                    &rtables,
+                    face,
+                    &expr,
+                    msg.ext_nodeid.node_id,
+                );
+
+                let query = Arc::new(Query {
+                    src_face: face.clone(),
+                    src_qid: msg.id,
+                });
+
+                let queries_lock = zasyncwrite!(tables_ref.queries_lock);
+                let route = compute_final_route(
+                    tables_ref.hat_code.as_ref(),
+                    &rtables,
+                    &route,
+                    face,
+                    &expr,
+                    &msg.ext_target,
+                    query,
+                )
+                .build();
+                let timeout = msg.ext_timeout.unwrap_or(rtables.queries_default_timeout);
+                drop(queries_lock);
+                drop(rtables);
+
+                if route.is_empty() {
+                    tracing::debug!(
+                        "{}:{} Send final reply (no matching queryables or not master)",
+                        face,
+                        msg.id
+                    );
+                    face.primitives
+                        .clone()
+                        .send_response_final(ResponseFinal {
+                            rid: msg.id,
+                            ext_qos: response::ext::QoSType::RESPONSE_FINAL,
+                            ext_tstamp: None,
+                        }).await;
+                } else {
+                    for ((outface, key_expr, context), outqid) in route {
+                        QueryCleanup::spawn_query_clean_up_task(
+                            &outface, tables_ref, outqid, timeout,
+                        );
+
+                        tracing::trace!(
+                            "{}:{} Propagate query to {}:{}",
+                            face,
+                            msg.id,
+                            outface,
+                            outqid
+                        );
+                        let msg_to_send = Request {
+                            id: outqid,
+                            wire_expr: key_expr,
+                            ext_qos: msg.ext_qos,
+                            ext_tstamp: msg.ext_tstamp,
+                            ext_nodeid: ext::NodeIdType { node_id: context },
+                            ext_target: msg.ext_target,
+                            ext_budget: msg.ext_budget,
+                            ext_timeout: msg.ext_timeout,
+                            payload: msg.payload.clone(),
+                        };
+                        if outface.primitives.send_request(msg_to_send).await {
+                            #[cfg(feature = "stats")]
+                            payload_observer.observe_payload(zenoh_stats::Tx, &outface, msg);
+                        }
+                    }
+                }
+            } else {
+                tracing::debug!("{}:{} Send final reply (not master)", face, msg.id);
+                drop(rtables);
+                face.primitives
+                    .clone()
+                    .send_response_final(ResponseFinal {
+                        rid: msg.id,
+                        ext_qos: response::ext::QoSType::RESPONSE_FINAL,
+                        ext_tstamp: None,
+                    }).await;
+            }
+        }
+        None => {
+            tracing::error!(
+                "{}:{} Route query with unknown scope {}! Send final reply.",
+                face,
+                msg.id,
+                msg.wire_expr.scope,
+            );
+            drop(rtables);
+            face.primitives
+                .clone()
+                .send_response_final(ResponseFinal {
+                    rid: msg.id,
+                    ext_qos: response::ext::QoSType::RESPONSE_FINAL,
+                    ext_tstamp: None,
+                }).await;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn route_send_response(
     tables_ref: &Arc<TablesLock>,
     face: &mut Arc<FaceState>,
     msg: &mut Response,
 ) {
-    let tables = zread!(tables_ref.tables);
-    match tables
-        .data
-        .get_mapping(face, &msg.wire_expr.scope, msg.wire_expr.mapping)
-    {
+    let tables = zasyncread!(tables_ref.tables);
+    match tables.get_mapping(face, &msg.wire_expr.scope, msg.wire_expr.mapping) {
         Some(prefix) => {
             let expr = msg
                 .wire_expr
@@ -550,13 +624,9 @@ pub(crate) fn route_send_response(
             let payload_observer = super::stats::PayloadObserver::new(msg, expr.as_ref(), &tables);
             #[cfg(feature = "stats")]
             payload_observer.observe_payload(zenoh_stats::Rx, face, msg);
-            let queries_lock = zread!(tables_ref.queries_lock);
-            match face
-                .pending_queries
-                .get(&msg.rid)
-                .map(|(q, _)| q.as_ref().clone())
-            {
-                Some(query) => {
+            let queries_lock = zasyncread!(tables_ref.queries_lock);
+            match face.pending_queries.get(&msg.rid) {
+                Some((query, _)) => {
                     if let Some(expr) = expr {
                         // TODO: consider to optimize keyexpr for 2.0 ?
                         // Doing it now will break wire compatibility
@@ -584,8 +654,8 @@ pub(crate) fn route_send_response(
                     drop(queries_lock);
 
                     msg.rid = query.src_qid;
-                    msg.ext_qos = query.src_qos;
-                    if query.src_face.primitives.send_response(msg) {
+                    let msg_to_send = msg.clone();
+                    if query.src_face.primitives.send_response(msg_to_send).await {
                         #[cfg(feature = "stats")]
                         payload_observer.observe_payload(zenoh_stats::Tx, &query.src_face, msg);
                     }
@@ -604,12 +674,12 @@ pub(crate) fn route_send_response(
     }
 }
 
-pub(crate) fn route_send_response_final(
+pub(crate) async fn route_send_response_final(
     tables_ref: &Arc<TablesLock>,
     face: &mut Arc<FaceState>,
     qid: RequestId,
 ) {
-    let queries_lock = zwrite!(tables_ref.queries_lock);
+    let queries_lock = zasyncwrite!(tables_ref.queries_lock);
     match get_mut_unchecked(face).pending_queries.remove(&qid) {
         Some(query) => {
             drop(queries_lock);
@@ -627,8 +697,8 @@ pub(crate) fn route_send_response_final(
     }
 }
 
-pub(crate) fn finalize_pending_queries(tables_ref: &TablesLock, face: &mut Arc<FaceState>) {
-    let queries_lock = zwrite!(tables_ref.queries_lock);
+pub(crate) async fn finalize_pending_queries(tables_ref: &TablesLock, face: &mut Arc<FaceState>) {
+    let queries_lock = zasyncwrite!(tables_ref.queries_lock);
     for (_, query) in get_mut_unchecked(face).pending_queries.drain() {
         finalize_pending_query(query);
     }
@@ -640,15 +710,17 @@ pub(crate) fn finalize_pending_query(query: (Arc<Query>, CancellationToken)) {
     cancellation_token.cancel();
     if let Some(query) = Arc::into_inner(query) {
         tracing::debug!("{}:{} Propagate final reply", query.src_face, query.src_qid);
-        query
-            .src_face
-            .primitives
-            .clone()
-            .send_response_final(&mut ResponseFinal {
-                rid: query.src_qid,
-                ext_qos: query.src_qos,
-                ext_tstamp: None,
-            });
+        let primitives = query.src_face.primitives.clone();
+        let rid = query.src_qid;
+        tokio::spawn(async move {
+            primitives
+                .send_response_final(ResponseFinal {
+                    rid,
+                    ext_qos: response::ext::QoSType::RESPONSE_FINAL,
+                    ext_tstamp: None,
+                })
+                .await;
+        });
     }
 }
 

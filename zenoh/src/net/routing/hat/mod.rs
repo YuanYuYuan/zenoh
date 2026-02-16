@@ -105,7 +105,8 @@ impl Sources {
     }
 }
 
-pub(crate) type SendDeclare<'a> = dyn FnMut(&Arc<dyn crate::net::primitives::EPrimitives + Send + Sync>, RoutingContext<Declare>)
+pub(crate) type SendDeclare<'a> = dyn FnMut(&Arc<dyn crate::net::primitives::Primitives + Send + Sync>, RoutingContext<Declare>)
+    + Send
     + 'a;
 pub(crate) trait HatTrait:
     HatBaseTrait + HatInterestTrait + HatPubSubTrait + HatQueriesTrait + HatTokenTrait

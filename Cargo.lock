@@ -4961,6 +4961,8 @@ version = "1.9.0"
 dependencies = [
  "ahash",
  "arc-swap",
+ "async-channel 2.5.0",
+ "async-lock 3.4.1",
  "async-trait",
  "bytes",
  "const_format",
@@ -5626,6 +5628,8 @@ dependencies = [
 name = "zenoh-transport"
 version = "1.9.0"
 dependencies = [
+ "async-channel 2.5.0",
+ "async-lock 3.4.1",
  "async-trait",
  "crossbeam-utils",
  "flume",

@@ -14,8 +14,7 @@
 
 use std::sync::Arc;
 
-use itertools::Itertools;
-use zenoh_core::zread;
+use zenoh_core::{zasyncread, zread};
 use zenoh_protocol::{
     core::{Region, Reliability, WireExpr},
     network::{declare::SubscriberId, push::ext, Push},
@@ -39,24 +38,54 @@ use crate::net::routing::{
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub(crate) struct SubscriberInfo;
 
-impl Face {
-    #[tracing::instrument(
-        level = "debug",
-        skip(self, send_declare, sub_info),
-        fields(expr = %expr, node_id = node_id_as_source(node_id)),
-        ret
-    )]
-    pub(crate) fn declare_subscriber(
-        &self,
-        id: SubscriberId,
-        expr: &WireExpr,
-        sub_info: &SubscriberInfo,
-        node_id: NodeId,
-        send_declare: &mut SendDeclare,
-    ) {
-        self.with_mapped_expr(expr, |tables, mut res| {
-            let hats = &mut tables.hats;
-            let region = self.state.region;
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn declare_subscription<'a>(
+    hat_code: &(dyn HatTrait + Send + Sync),
+    tables: &TablesLock,
+    face: &mut Arc<FaceState>,
+    id: SubscriberId,
+    expr: &'a WireExpr<'a>,
+    sub_info: &SubscriberInfo,
+    node_id: NodeId,
+    send_declare: &'a mut SendDeclare<'a>,
+) {
+    let rtables = zasyncread!(tables.tables);
+    match rtables
+        .get_mapping(face, &expr.scope, expr.mapping)
+        .cloned()
+    {
+        Some(mut prefix) => {
+            tracing::debug!(
+                "{} Declare subscriber {} ({}{})",
+                face,
+                id,
+                prefix.expr(),
+                expr.suffix
+            );
+            let res = Resource::get_resource(&prefix, &expr.suffix);
+            let (mut res, mut wtables) =
+                if res.as_ref().map(|r| r.context.is_some()).unwrap_or(false) {
+                    drop(rtables);
+                    let wtables = zasyncwrite!(tables.tables);
+                    (res.unwrap(), wtables)
+                } else {
+                    let mut fullexpr = prefix.expr().to_string();
+                    fullexpr.push_str(expr.suffix.as_ref());
+                    let mut matches = keyexpr::new(fullexpr.as_str())
+                        .map(|ke| Resource::get_matches(&rtables, ke))
+                        .unwrap_or_default();
+                    drop(rtables);
+                    let mut wtables = zasyncwrite!(tables.tables);
+                    let mut res = Resource::make_resource(
+                        hat_code,
+                        &mut wtables,
+                        &mut prefix,
+                        expr.suffix.as_ref(),
+                    );
+                    matches.push(Arc::downgrade(&res));
+                    Resource::match_resource(&wtables, &mut res, matches);
+                    (res, wtables)
+                };
 
             let mut ctx = DispatcherContext {
                 tables_lock: &self.tables,
@@ -81,50 +110,59 @@ impl Face {
         });
     }
 
-    #[tracing::instrument(
-        level = "debug",
-        skip(self, send_declare),
-        fields(expr = %expr, node_id = node_id_as_source(node_id)),
-        ret
-    )]
-    pub(crate) fn undeclare_subscriber(
-        &self,
-        id: SubscriberId,
-        expr: &WireExpr,
-        node_id: NodeId,
-        send_declare: &mut SendDeclare,
-    ) {
-        self.with_mapped_nullable_expr(expr, /* make_if_unknown */ false, |tables, res| {
-            let region = self.state.region;
-
-            let mut ctx = DispatcherContext {
-                tables_lock: &self.tables,
-                tables: &mut tables.data,
-                src_face: &mut self.state.clone(),
-                send_declare,
-            };
-
-            if let Some(mut res) =
-                tables.hats[region].unregister_subscriber(ctx.reborrow(), id, res.clone(), node_id)
-            {
-                tables.hats[region].disable_data_routes(&mut res);
-
-                let mut remaining = tables
-                    .hats
-                    .values_mut()
-                    .filter(|hat| hat.remote_subscribers_of(ctx.tables, &res).is_some())
-                    .collect_vec();
-
-                if (*remaining).is_empty() {
-                    for hat in tables.hats.values_mut() {
-                        hat.unpropagate_subscriber(ctx.reborrow(), res.clone());
-                    }
-                    Resource::clean(&mut res);
-                } else if let [last_owner] = &mut *remaining {
-                    last_owner.unpropagate_last_non_owned_subscriber(ctx, res.clone())
+pub(crate) async fn undeclare_subscription<'a>(
+    hat_code: &(dyn HatTrait + Send + Sync),
+    tables: &TablesLock,
+    face: &mut Arc<FaceState>,
+    id: SubscriberId,
+    expr: &'a WireExpr<'a>,
+    node_id: NodeId,
+    send_declare: &'a mut SendDeclare<'a>,
+) {
+    let res = if expr.is_empty() {
+        None
+    } else {
+        let rtables = zasyncread!(tables.tables);
+        match rtables.get_mapping(face, &expr.scope, expr.mapping) {
+            Some(prefix) => match Resource::get_resource(prefix, expr.suffix.as_ref()) {
+                Some(res) => Some(res),
+                None => {
+                    tracing::error!(
+                        "{} Undeclare unknown subscriber {}{}!",
+                        face,
+                        prefix.expr(),
+                        expr.suffix
+                    );
+                    return;
                 }
             }
-        });
+        }
+    };
+    let mut wtables = zasyncwrite!(tables.tables);
+    if let Some(mut res) =
+        hat_code.undeclare_subscription(&mut wtables, face, id, res, node_id, send_declare)
+    {
+        tracing::debug!("{} Undeclare subscriber {} ({})", face, id, res.expr());
+        disable_matches_data_routes(&mut wtables, &mut res);
+        Resource::clean(&mut res);
+        drop(wtables);
+    } else {
+        // NOTE: This is expected behavior if subscriber declarations are denied with ingress ACL interceptor.
+        tracing::debug!("{} Undeclare unknown subscriber {}", face, id);
+    }
+}
+
+pub(crate) fn disable_matches_data_routes(_tables: &mut Tables, res: &mut Arc<Resource>) {
+    if res.context.is_some() {
+        get_mut_unchecked(res).context_mut().disable_data_routes();
+        for match_ in &res.context().matches {
+            let mut match_ = match_.upgrade().unwrap();
+            if !Arc::ptr_eq(&match_, res) {
+                get_mut_unchecked(&mut match_)
+                    .context_mut()
+                    .disable_data_routes();
+            }
+        }
     }
 }
 
@@ -229,27 +267,23 @@ fn get_data_route(
     }
 }
 
-pub fn route_data(
+pub async fn route_data(
     tables_ref: &Arc<TablesLock>,
     src_face: &FaceState,
     msg: &mut Push,
     reliability: Reliability,
     consume: bool,
 ) {
-    let rtables = zread!(tables_ref.tables);
-    let tables = &*rtables;
-    let Some(prefix) =
-        rtables
-            .data
-            .get_mapping(src_face, &msg.wire_expr.scope, msg.wire_expr.mapping)
-    else {
-        tracing::error!(
-            "{} Route data with unknown scope {}!",
-            src_face,
-            msg.wire_expr.scope
-        );
-        return;
-    };
+    let tables = zasyncread!(tables_ref.tables);
+    match tables.get_mapping(face, &msg.wire_expr.scope, msg.wire_expr.mapping) {
+        Some(prefix) => {
+            tracing::trace!(
+                "{} Route data for res {}{}",
+                face,
+                prefix.expr(),
+                msg.wire_expr.suffix.as_ref()
+            );
+            let expr = RoutingExpr::new(prefix, msg.wire_expr.suffix.as_ref());
 
     tracing::trace!(
         "{} Route data for res {}{}",
@@ -272,7 +306,67 @@ pub fn route_data(
     let send_push = |dst_face: &FaceState, msg: &mut Push, reliability: Reliability| {
         if dst_face.primitives.send_push(msg, reliability) {
             #[cfg(feature = "stats")]
-            payload_observer.observe_payload(zenoh_stats::Tx, dst_face, msg);
+            let payload_observer = super::stats::PayloadObserver::new(msg, Some(&expr), &tables);
+            #[cfg(feature = "stats")]
+            payload_observer.observe_payload(zenoh_stats::Rx, face, msg);
+
+            if tables_ref.hat_code.ingress_filter(&tables, face, &expr) {
+                let route = get_data_route(
+                    tables_ref.hat_code.as_ref(),
+                    &tables,
+                    face,
+                    &expr,
+                    msg.ext_nodeid.node_id,
+                );
+
+                if !route.is_empty() {
+                    treat_timestamp!(&tables.hlc, msg.payload, tables.drop_future_timestamp);
+
+                    if route.len() == 1 {
+                        let (outface, key_expr, context) = route.iter().next().unwrap();
+                        if tables_ref
+                            .hat_code
+                            .egress_filter(&tables, face, outface, &expr)
+                        {
+                            drop(tables);
+                            msg.wire_expr = key_expr.into();
+                            msg.ext_nodeid = ext::NodeIdType { node_id: *context };
+                            let mut msg_to_send = msg.clone();
+                            if outface.primitives.send_push(msg_to_send, reliability).await {
+                                #[cfg(feature = "stats")]
+                                payload_observer.observe_payload(zenoh_stats::Tx, outface, msg);
+                            }
+                            // Reset the wire_expr to indicate the message has been consumed
+                            msg.wire_expr = WireExpr::empty();
+                        }
+                    } else {
+                        let route = route
+                            .iter()
+                            .filter(|(outface, _key_expr, _context)| {
+                                tables_ref
+                                    .hat_code
+                                    .egress_filter(&tables, face, outface, &expr)
+                            })
+                            .cloned()
+                            .collect::<Vec<Direction>>();
+
+                        drop(tables);
+                        for (outface, key_expr, context) in route {
+                            let msg_to_send = Push {
+                                wire_expr: key_expr,
+                                ext_qos: msg.ext_qos,
+                                ext_tstamp: None,
+                                ext_nodeid: ext::NodeIdType { node_id: context },
+                                payload: msg.payload.clone(),
+                            };
+                            if outface.primitives.send_push(msg_to_send, reliability).await {
+                                #[cfg(feature = "stats")]
+                                payload_observer.observe_payload(zenoh_stats::Tx, &outface, &msg);
+                            }
+                        }
+                    }
+                }
+            }
         }
     };
 

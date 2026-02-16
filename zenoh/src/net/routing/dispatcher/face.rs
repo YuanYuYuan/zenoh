@@ -19,11 +19,11 @@ use std::{
     time::Duration,
 };
 
-use arc_swap::ArcSwapOption;
-use itertools::Itertools;
+use arc_swap::ArcSwap;
+use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 use zenoh_collections::IntHashMap;
-use zenoh_keyexpr::keyexpr;
+use zenoh_core::{zasynclock, zasyncwrite};
 use zenoh_protocol::{
     core::{Bound, ExprId, Region, Reliability, WhatAmI, WireExpr, ZenohIdProto},
     network::{
@@ -116,9 +116,7 @@ pub struct FaceState {
     pub(crate) id: FaceId,
     pub(crate) zid: ZenohIdProto,
     pub(crate) whatami: WhatAmI,
-    pub(crate) region: Region,
-    pub(crate) remote_bound: Bound,
-    pub(crate) primitives: Arc<dyn crate::net::primitives::EPrimitives + Send + Sync>,
+    pub(crate) primitives: Arc<dyn crate::net::primitives::Primitives + Send + Sync>,
     pub(crate) local_interests: HashMap<InterestId, InterestState>,
     pub(crate) remote_key_interests: HashMap<InterestId, Option<Arc<Resource>>>,
     pub(crate) pending_current_interests: HashMap<InterestId, PendingCurrentInterest>,
@@ -148,12 +146,15 @@ impl FaceStateBuilder {
     pub(crate) fn new(
         id: usize,
         zid: ZenohIdProto,
-        region: Region,
-        remote_bound: Bound,
-        primitives: Arc<dyn EPrimitives + Send + Sync>,
-        hats: RegionMap<Box<dyn Any + Send + Sync>>,
-    ) -> Self {
-        FaceStateBuilder(FaceState {
+        whatami: WhatAmI,
+        primitives: Arc<dyn crate::net::primitives::Primitives + Send + Sync>,
+        mcast_group: Option<TransportMulticast>,
+        in_interceptors: Option<Arc<ArcSwap<InterceptorsChain>>>,
+        hat: Box<dyn Any + Send + Sync>,
+        is_local: bool,
+        #[cfg(feature = "stats")] stats: Option<zenoh_stats::TransportStats>,
+    ) -> Arc<FaceState> {
+        Arc::new(FaceState {
             id,
             zid,
             whatami: WhatAmI::default(),
@@ -536,29 +537,47 @@ impl Face {
     }
 }
 
+// Unified async Primitives implementation for Face
+#[async_trait]
 impl Primitives for Face {
-    fn send_interest(&self, msg: &mut zenoh_protocol::network::Interest) {
-        let ctrl_lock = zlock!(self.tables.ctrl_lock);
+    async fn send_interest(&self, mut msg: zenoh_protocol::network::Interest) -> bool {
+        let ctrl_lock = zasynclock!(self.tables.ctrl_lock);
         if msg.mode != InterestMode::Final {
             let mut declares = vec![];
-            self.interest(msg, &mut |p, m| declares.push((p.clone(), m)));
+            declare_interest(
+                self.tables.hat_code.as_ref(),
+                &self.tables,
+                &mut self.state.clone(),
+                msg.id,
+                msg.wire_expr.as_ref(),
+                msg.mode,
+                msg.options,
+                &mut |p, m| declares.push((p.clone(), m)),
+            ).await;
             drop(ctrl_lock);
             for (p, m) in declares {
-                m.with_mut(|m| p.send_declare(m));
+                // Extract the owned message from RoutingContext and send it async
+                let _ = p.send_declare(m.msg).await;
             }
         } else {
-            self.interest_final(msg);
+            undeclare_interest(
+                self.tables.hat_code.as_ref(),
+                &self.tables,
+                &mut self.state.clone(),
+                msg.id,
+            ).await;
         }
+        true
     }
 
-    fn send_declare(&self, msg: &mut zenoh_protocol::network::Declare) {
-        let ctrl_lock = zlock!(self.tables.ctrl_lock);
+    async fn send_declare(&self, mut msg: zenoh_protocol::network::Declare) -> bool {
+        let ctrl_lock = zasynclock!(self.tables.ctrl_lock);
         match &mut msg.body {
             zenoh_protocol::network::DeclareBody::DeclareKeyExpr(m) => {
-                register_expr(&self.tables, &mut self.state.clone(), m.id, &m.wire_expr);
+                register_expr(&self.tables, &mut self.state.clone(), m.id, &m.wire_expr).await;
             }
             zenoh_protocol::network::DeclareBody::UndeclareKeyExpr(m) => {
-                unregister_expr(&self.tables, &mut self.state.clone(), m.id);
+                unregister_expr(&self.tables, &mut self.state.clone(), m.id).await;
             }
             zenoh_protocol::network::DeclareBody::DeclareSubscriber(m) => {
                 let mut declares = vec![];
@@ -568,10 +587,11 @@ impl Primitives for Face {
                     &SubscriberInfo,
                     msg.ext_nodeid.node_id,
                     &mut |p, m| declares.push((p.clone(), m)),
-                );
+                ).await;
                 drop(ctrl_lock);
                 for (p, m) in declares {
-                    m.with_mut(|m| p.send_declare(m));
+                    // Extract the owned message from RoutingContext and send it async
+                    let _ = p.send_declare(m.msg).await;
                 }
             }
             zenoh_protocol::network::DeclareBody::UndeclareSubscriber(m) => {
@@ -581,10 +601,11 @@ impl Primitives for Face {
                     &m.ext_wire_expr.wire_expr,
                     msg.ext_nodeid.node_id,
                     &mut |p, m| declares.push((p.clone(), m)),
-                );
+                ).await;
                 drop(ctrl_lock);
                 for (p, m) in declares {
-                    m.with_mut(|m| p.send_declare(m));
+                    // Extract the owned message from RoutingContext and send it async
+                    let _ = p.send_declare(m.msg).await;
                 }
             }
             zenoh_protocol::network::DeclareBody::DeclareQueryable(m) => {
@@ -595,10 +616,11 @@ impl Primitives for Face {
                     &m.ext_info,
                     msg.ext_nodeid.node_id,
                     &mut |p, m| declares.push((p.clone(), m)),
-                );
+                ).await;
                 drop(ctrl_lock);
                 for (p, m) in declares {
-                    m.with_mut(|m| p.send_declare(m));
+                    // Extract the owned message from RoutingContext and send it async
+                    let _ = p.send_declare(m.msg).await;
                 }
             }
             zenoh_protocol::network::DeclareBody::UndeclareQueryable(m) => {
@@ -608,10 +630,11 @@ impl Primitives for Face {
                     &m.ext_wire_expr.wire_expr,
                     msg.ext_nodeid.node_id,
                     &mut |p, m| declares.push((p.clone(), m)),
-                );
+                ).await;
                 drop(ctrl_lock);
                 for (p, m) in declares {
-                    m.with_mut(|m| p.send_declare(m));
+                    // Extract the owned message from RoutingContext and send it async
+                    let _ = p.send_declare(m.msg).await;
                 }
             }
             zenoh_protocol::network::DeclareBody::DeclareToken(m) => {
@@ -622,10 +645,11 @@ impl Primitives for Face {
                     msg.ext_nodeid.node_id,
                     msg.interest_id,
                     &mut |p, m| declares.push((p.clone(), m)),
-                );
+                ).await;
                 drop(ctrl_lock);
                 for (p, m) in declares {
-                    m.with_mut(|m| p.send_declare(m));
+                    // Extract the owned message from RoutingContext and send it async
+                    let _ = p.send_declare(m.msg).await;
                 }
             }
             zenoh_protocol::network::DeclareBody::UndeclareToken(m) => {
@@ -635,10 +659,11 @@ impl Primitives for Face {
                     &m.ext_wire_expr,
                     msg.ext_nodeid.node_id,
                     &mut |p, m| declares.push((p.clone(), m)),
-                );
+                ).await;
                 drop(ctrl_lock);
                 for (p, m) in declares {
-                    m.with_mut(|m| p.send_declare(m));
+                    // Extract the owned message from RoutingContext and send it async
+                    let _ = p.send_declare(m.msg).await;
                 }
             }
             zenoh_protocol::network::DeclareBody::DeclareFinal(_) => {
@@ -647,62 +672,62 @@ impl Primitives for Face {
                     return;
                 };
 
-                let mut wtables = zwrite!(self.tables.tables);
-                let mut declares = vec![];
-                self.declare_final(&mut wtables, id, msg.ext_nodeid.node_id, &mut |p, m| {
-                    declares.push((p.clone(), m))
-                });
+                    let mut wtables = zasyncwrite!(self.tables.tables);
+                    let mut declares = vec![];
+                    declare_final(
+                        self.tables.hat_code.as_ref(),
+                        &mut wtables,
+                        &mut self.state.clone(),
+                        id,
+                        &mut |p, m| declares.push((p.clone(), m)),
+                    ).await;
 
-                drop(wtables);
-                drop(ctrl_lock);
-                for (p, m) in declares {
-                    m.with_mut(|m| p.send_declare(m));
+                    wtables.disable_all_routes();
+
+                    drop(wtables);
+                    drop(ctrl_lock);
+                    for (p, m) in declares {
+                        // Extract the owned message from RoutingContext and send it async
+                        let _ = p.send_declare(m.msg).await;
+                    }
                 }
             }
         }
+        true
     }
 
     #[inline]
-    fn send_push_consume(&self, msg: &mut Push, reliability: Reliability, consume: bool) {
-        let _span = tracing::enabled!(tracing::Level::DEBUG).then(|| {
-            tracing::debug_span!(
-                "send_push",
-                expr = %msg.wire_expr,
-                is_reliable = bool::from(reliability),
-                consume,
-            )
-            .entered()
-        });
-
-        route_data(&self.tables, &self.state, msg, reliability, consume);
+    async fn send_push(&self, mut msg: Push, reliability: Reliability) -> bool {
+        route_data(&self.tables, &self.state, &mut msg, reliability).await;
+        true
     }
 
-    #[tracing::instrument(level = "debug", skip(msg), fields(id = msg.id, expr = %msg.wire_expr), ret)]
-    fn send_request(&self, msg: &mut Request) {
+    async fn send_request(&self, mut msg: Request) -> bool {
         match msg.payload {
             RequestBody::Query(_) => {
-                self.route_query(msg);
+                route_query(&self.tables, &self.state, &mut msg);
             }
         }
+        true
     }
 
-    #[tracing::instrument(level = "debug", skip(msg), fields(rid = msg.rid, expr = %msg.wire_expr), ret)]
-    fn send_response(&self, msg: &mut Response) {
-        route_send_response(&self.tables, &mut self.state.clone(), msg);
+    async fn send_response(&self, mut msg: Response) -> bool {
+        route_send_response(&self.tables, &mut self.state.clone(), &mut msg);
+        true
     }
 
-    #[tracing::instrument(level = "debug", skip(msg), fields(rid = msg.rid), ret)]
-    fn send_response_final(&self, msg: &mut ResponseFinal) {
+    async fn send_response_final(&self, msg: ResponseFinal) -> bool {
         route_send_response_final(&self.tables, &mut self.state.clone(), msg.rid);
+        true
     }
 
-    #[tracing::instrument(level = "debug", skip(self), fields(src = %self), ret)]
-    fn send_close(&self) {
+    async fn close(&self) {
+        tracing::debug!("{} Close", self.state);
         let mut state = self.state.clone();
         state.task_controller.terminate_all(Duration::from_secs(10));
         finalize_pending_queries(&self.tables, &mut state);
         let mut declares = vec![];
-        let ctrl_lock = zlock!(self.tables.ctrl_lock);
+        let ctrl_lock = zasynclock!(self.tables.ctrl_lock);
         finalize_pending_interests(&self.tables, &mut state, &mut |p, m| {
             declares.push((p.clone(), m))
         });
@@ -816,11 +841,12 @@ impl Primitives for Face {
         drop(wtables);
         drop(ctrl_lock);
         for (p, m) in declares {
-            m.with_mut(|m| p.send_declare(m));
+            // Extract the owned message from RoutingContext and send it async
+            let _ = p.send_declare(m.msg).await;
         }
     }
 
-    fn as_any(&self) -> &dyn Any {
+    fn as_any(&self) -> &dyn std::any::Any {
         self
     }
 }

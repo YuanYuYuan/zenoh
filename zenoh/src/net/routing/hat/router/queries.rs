@@ -104,22 +104,28 @@ impl Hat {
                         {
                             let key_expr = Resource::decl_key(res, &mut someface);
                             tracing::debug!(dst = %someface);
-                            someface.primitives.send_declare(RoutingContext::with_expr(
-                                &mut Declare {
-                                    interest_id: None,
-                                    ext_qos: declare::ext::QoSType::DECLARE,
-                                    ext_tstamp: None,
-                                    ext_nodeid: declare::ext::NodeIdType {
-                                        node_id: routing_context,
+                            let primitives = someface.primitives.clone();
+                            let expr_str = res.expr().to_string();
+                            let info = *qabl_info;
+                            tokio::spawn(async move {
+                                let ctx = RoutingContext::with_expr(
+                                    Declare {
+                                        interest_id: None,
+                                        ext_qos: declare::ext::QoSType::DECLARE,
+                                        ext_tstamp: None,
+                                        ext_nodeid: declare::ext::NodeIdType {
+                                            node_id: routing_context,
+                                        },
+                                        body: DeclareBody::DeclareQueryable(DeclareQueryable {
+                                            id: QueryableId::default(), // Sourced queryables do not use ids
+                                            wire_expr: key_expr,
+                                            ext_info: info,
+                                        }),
                                     },
-                                    body: DeclareBody::DeclareQueryable(DeclareQueryable {
-                                        id: QueryableId::default(), // Sourced queryables do not use ids
-                                        wire_expr: key_expr,
-                                        ext_info: *qabl_info,
-                                    }),
-                                },
-                                res.expr().to_string(),
-                            ));
+                                    expr_str,
+                                );
+                                primitives.send_declare(ctx.msg).await;
+                            });
                         }
                     }
                     None => {
@@ -188,21 +194,26 @@ impl Hat {
                             let wire_expr = Resource::decl_key(res, &mut someface);
 
                             tracing::debug!(dst = %someface);
-                            someface.primitives.send_declare(RoutingContext::with_expr(
-                                &mut Declare {
-                                    interest_id: None,
-                                    ext_qos: declare::ext::QoSType::DECLARE,
-                                    ext_tstamp: None,
-                                    ext_nodeid: declare::ext::NodeIdType {
-                                        node_id: routing_context,
+                            let primitives = someface.primitives.clone();
+                            let expr_str = res.expr().to_string();
+                            tokio::spawn(async move {
+                                let ctx = RoutingContext::with_expr(
+                                    Declare {
+                                        interest_id: None,
+                                        ext_qos: declare::ext::QoSType::DECLARE,
+                                        ext_tstamp: None,
+                                        ext_nodeid: declare::ext::NodeIdType {
+                                            node_id: routing_context,
+                                        },
+                                        body: DeclareBody::UndeclareQueryable(UndeclareQueryable {
+                                            id: QueryableId::default(), // Sourced queryables do not use ids
+                                            ext_wire_expr: WireExprType { wire_expr },
+                                        }),
                                     },
-                                    body: DeclareBody::UndeclareQueryable(UndeclareQueryable {
-                                        id: QueryableId::default(), // Sourced queryables do not use ids
-                                        ext_wire_expr: WireExprType { wire_expr },
-                                    }),
-                                },
-                                res.expr().to_string(),
-                            ));
+                                    expr_str,
+                                );
+                                primitives.send_declare(ctx.msg).await;
+                            });
                         }
                     }
                     None => {

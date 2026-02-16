@@ -67,9 +67,10 @@ impl DeMuxContext<'_> {
     fn prefix(&self, msg: &NetworkMessageMut) -> Option<Arc<Resource>> {
         if let Some(wire_expr) = msg.wire_expr() {
             let wire_expr = wire_expr.to_owned();
-            let rtables = zread!(self.demux.face.tables.tables);
-            if let Some(prefix) = rtables
-                .data
+            // Note: Using blocking lock here since InterceptorContext trait methods are sync
+            use futures::executor::block_on;
+            let tables = block_on(self.demux.face.tables.tables.read());
+            if let Some(prefix) = tables
                 .get_mapping(&self.demux.face.state, &wire_expr.scope, wire_expr.mapping)
                 .cloned()
             {
@@ -138,38 +139,41 @@ impl TransportPeerEventHandler for DeMux {
                 match &msg.body {
                     NetworkBodyMut::Request(request) => {
                         let request_id = request.id;
-                        let qos = request.ext_qos;
-                        if !interceptor.intercept(&mut msg, &mut ctx) {
+                        if !interceptor.intercept(&mut msg, &mut ctx as &mut dyn InterceptorContext) {
                             // request was blocked by an interceptor, we need to send response final to avoid timeout error
-                            self.face
-                                .state
-                                .primitives
-                                .send_response_final(&mut ResponseFinal {
+                            let primitives = self.face.state.primitives.clone();
+                            tokio::spawn(async move {
+                                primitives.send_response_final(ResponseFinal {
                                     rid: request_id,
-                                    ext_qos: qos,
+                                    ext_qos: response::ext::QoSType::RESPONSE_FINAL,
                                     ext_tstamp: None,
-                                });
+                                }).await;
+                            });
                             return Ok(());
                         }
                     }
                     NetworkBodyMut::Interest(interest) => {
                         let interest_id = interest.id;
-                        if !interceptor.intercept(&mut msg, &mut ctx) {
+                        if !interceptor.intercept(&mut msg, &mut ctx as &mut dyn InterceptorContext) {
                             // request was blocked by an interceptor, we need to send declare final to avoid timeout error
-                            self.face.state.primitives.send_declare(RoutingContext::new(
-                                &mut Declare {
-                                    interest_id: Some(interest_id),
-                                    ext_qos: ext::QoSType::DECLARE,
-                                    ext_tstamp: None,
-                                    ext_nodeid: ext::NodeIdType::DEFAULT,
-                                    body: DeclareBody::DeclareFinal(DeclareFinal),
-                                },
-                            ));
+                            let primitives = self.face.state.primitives.clone();
+                            tokio::spawn(async move {
+                                let ctx = RoutingContext::new(
+                                    Declare {
+                                        interest_id: Some(interest_id),
+                                        ext_qos: ext::QoSType::DECLARE,
+                                        ext_tstamp: None,
+                                        ext_nodeid: ext::NodeIdType::DEFAULT,
+                                        body: DeclareBody::DeclareFinal(DeclareFinal),
+                                    },
+                                );
+                                primitives.send_declare(ctx.msg).await;
+                            });
                             return Ok(());
                         }
                     }
                     _ => {
-                        if !interceptor.intercept(&mut msg, &mut ctx) {
+                        if !interceptor.intercept(&mut msg, &mut ctx as &mut dyn InterceptorContext) {
                             return Ok(());
                         }
                     }
@@ -177,46 +181,58 @@ impl TransportPeerEventHandler for DeMux {
             }
         }
 
+        let face = self.face.clone();
         match msg.body {
-            NetworkBodyMut::Push(m) => self.face.send_push(m, msg.reliability),
-            NetworkBodyMut::Declare(m) => self.face.send_declare(m),
-            NetworkBodyMut::Interest(m) => self.face.send_interest(m),
-            NetworkBodyMut::Request(m) => self.face.send_request(m),
-            NetworkBodyMut::Response(m) => self.face.send_response(m),
-            NetworkBodyMut::ResponseFinal(m) => self.face.send_response_final(m),
+            NetworkBodyMut::Push(m) => {
+                let reliability = msg.reliability;
+                let msg = m.clone();
+                tokio::spawn(async move { face.send_push(msg, reliability).await });
+            }
+            NetworkBodyMut::Declare(m) => {
+                let msg = m.clone();
+                tokio::spawn(async move { face.send_declare(msg).await });
+            }
+            NetworkBodyMut::Interest(m) => {
+                let msg = m.clone();
+                tokio::spawn(async move { face.send_interest(msg).await });
+            }
+            NetworkBodyMut::Request(m) => {
+                let msg = m.clone();
+                tokio::spawn(async move { face.send_request(msg).await });
+            }
+            NetworkBodyMut::Response(m) => {
+                let msg = m.clone();
+                tokio::spawn(async move { face.send_response(msg).await });
+            }
+            NetworkBodyMut::ResponseFinal(m) => {
+                let msg = m.clone();
+                tokio::spawn(async move { face.send_response_final(msg).await });
+            }
             NetworkBodyMut::OAM(m) => {
-                if self.transport.is_none() {
-                    bail!("Received network OAM from face w/o transport");
-                }
-
-                let mut declares = vec![];
-                let ctrl_lock = zlock!(self.face.tables.ctrl_lock);
-                let mut wtables = zwrite!(self.face.tables.tables);
-                let tables = &mut *wtables;
-
-                let ctx = DispatcherContext {
-                    tables_lock: &self.face.tables,
-                    tables: &mut tables.data,
-                    src_face: &mut self.face.state.clone(),
-                    send_declare: &mut |p, m| declares.push((p.clone(), m)),
-                };
-
-                let (owner_hat, other_hats) = tables
-                    .hats
-                    .partition_mut(&self.face.state.region)
-                    .expect("face region should have a corresponding hat");
-
-                owner_hat.handle_oam(
-                    ctx,
-                    m,
-                    other_hats.map(|hat| &mut **hat as &mut dyn HatTrait),
-                )?;
-
-                drop(wtables);
-                drop(ctrl_lock);
-
-                for (p, m) in declares {
-                    m.with_mut(|m| p.send_declare(m));
+                if let Some(transport) = self.transport.as_ref() {
+                    // Spawn async work since TransportPeerEventHandler trait methods are sync
+                    let face = self.face.clone();
+                    let transport = transport.clone();
+                    let mut oam = m.clone();
+                    tokio::spawn(async move {
+                        let mut declares = vec![];
+                        let ctrl_lock = zasynclock!(face.tables.ctrl_lock);
+                        let mut tables = zasyncwrite!(face.tables.tables);
+                        if let Err(e) = face.tables.hat_code.handle_oam(
+                            &mut tables,
+                            &face.tables,
+                            &mut oam,
+                            &transport,
+                            &mut |p, m| declares.push((p.clone(), m)),
+                        ) {
+                            tracing::error!("Error handling OAM: {}", e);
+                        }
+                        drop(tables);
+                        drop(ctrl_lock);
+                        for (p, m) in declares {
+                            let _ = p.send_declare(m.msg).await;
+                        }
+                    });
                 }
             }
         }
@@ -229,7 +245,11 @@ impl TransportPeerEventHandler for DeMux {
     fn del_link(&self, _link: Link) {}
 
     fn closed(&self) {
-        self.face.send_close();
+        // Spawn async close in background since this trait method is sync
+        let face = self.face.clone();
+        tokio::spawn(async move {
+            face.close().await;
+        });
     }
 
     fn as_any(&self) -> &dyn Any {

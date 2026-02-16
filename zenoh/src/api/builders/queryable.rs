@@ -228,7 +228,7 @@ where
         let session = self.session;
         let (callback, receiver) = self.handler.into_handler();
         let mut ke = self.key_expr?;
-        ke = self.session.declare_nonwild_prefix(ke)?;
+        ke = futures::executor::block_on(self.session.declare_nonwild_prefix(ke))?;
         session
             .declare_queryable_inner(
                 &ke,
@@ -270,7 +270,7 @@ impl Resolvable for QueryableBuilder<'_, '_, Callback<Query>, true> {
 impl Wait for QueryableBuilder<'_, '_, Callback<Query>, true> {
     fn wait(self) -> <Self as Resolvable>::To {
         let mut ke = self.key_expr?;
-        ke = self.session.declare_nonwild_prefix(ke)?;
+        ke = futures::executor::block_on(self.session.declare_nonwild_prefix(ke))?;
         self.session.declare_queryable_inner(
             &ke,
             self.complete,

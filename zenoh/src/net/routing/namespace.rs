@@ -17,6 +17,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+use async_trait::async_trait;
 use tracing::trace;
 use zenoh_keyexpr::{keyexpr, OwnedNonWildKeyExpr};
 use zenoh_protocol::{
@@ -27,7 +28,7 @@ use zenoh_protocol::{
 };
 
 use super::dispatcher::face::Face;
-use crate::net::primitives::{EPrimitives, Primitives};
+use crate::net::primitives::Primitives;
 
 pub(crate) struct Namespace {
     namespace: OwnedNonWildKeyExpr,
@@ -80,45 +81,42 @@ impl Namespace {
     }
 }
 
+// Unified async Primitives implementation for Namespace
+#[async_trait]
 impl Primitives for Namespace {
-    fn send_interest(&self, msg: &mut zenoh_protocol::network::Interest) {
+    async fn send_interest(&self, mut msg: zenoh_protocol::network::Interest) -> bool {
         if let Some(w) = &mut msg.wire_expr {
             self.handle_namespace_egress(w, false);
         }
-        self.primitives.send_interest(msg);
+        self.primitives.send_interest(msg).await
     }
 
-    fn send_declare(&self, msg: &mut zenoh_protocol::network::Declare) {
-        self.handle_declare_egress(msg);
-        self.primitives.send_declare(msg);
+    async fn send_declare(&self, mut msg: zenoh_protocol::network::Declare) -> bool {
+        self.handle_declare_egress(&mut msg);
+        self.primitives.send_declare(msg).await
     }
 
-    fn send_push_consume(
-        &self,
-        msg: &mut Push,
-        reliability: zenoh_protocol::core::Reliability,
-        consume: bool,
-    ) {
+    async fn send_push(&self, mut msg: Push, reliability: zenoh_protocol::core::Reliability) -> bool {
         self.handle_namespace_egress(&mut msg.wire_expr, false);
-        self.primitives.send_push_consume(msg, reliability, consume);
+        self.primitives.send_push(msg, reliability).await
     }
 
-    fn send_request(&self, msg: &mut Request) {
+    async fn send_request(&self, mut msg: Request) -> bool {
         self.handle_namespace_egress(&mut msg.wire_expr, false);
-        self.primitives.send_request(msg);
+        self.primitives.send_request(msg).await
     }
 
-    fn send_response(&self, msg: &mut Response) {
+    async fn send_response(&self, mut msg: Response) -> bool {
         self.handle_namespace_egress(&mut msg.wire_expr, false);
-        self.primitives.send_response(msg);
+        self.primitives.send_response(msg).await
     }
 
-    fn send_response_final(&self, msg: &mut ResponseFinal) {
-        self.primitives.send_response_final(msg);
+    async fn send_response_final(&self, msg: ResponseFinal) -> bool {
+        self.primitives.send_response_final(msg).await
     }
 
-    fn send_close(&self) {
-        self.primitives.send_close();
+    async fn close(&self) {
+        self.primitives.close().await;
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -128,7 +126,7 @@ impl Primitives for Namespace {
 
 pub(crate) struct ENamespace {
     namespace: OwnedNonWildKeyExpr,
-    primitives: Arc<dyn EPrimitives + Send + Send>,
+    primitives: Arc<dyn Primitives + Send + Sync>,
     incomplete_ingress_keyexpr_declarations: RwLock<HashMap<u16, String>>,
     blocked_subscribers: RwLock<HashSet<u32>>,
     blocked_queryables: RwLock<HashSet<u32>>,
@@ -139,7 +137,7 @@ pub(crate) struct ENamespace {
 impl ENamespace {
     pub(crate) fn new(
         namespace: OwnedNonWildKeyExpr,
-        primitives: Arc<dyn EPrimitives + Send + Sync>,
+        primitives: Arc<dyn Primitives + Send + Sync>,
     ) -> Self {
         ENamespace {
             namespace,
@@ -247,40 +245,39 @@ impl ENamespace {
     }
 }
 
-impl EPrimitives for ENamespace {
+#[async_trait]
+impl Primitives for ENamespace {
+    async fn send_interest(&self, mut msg: zenoh_protocol::network::Interest) -> bool {
+        self.handle_interest_ingress(&mut msg) && self.primitives.send_interest(msg).await
+    }
+
+    async fn send_declare(&self, mut msg: zenoh_protocol::network::Declare) -> bool {
+        self.handle_declare_ingress(&mut msg) && self.primitives.send_declare(msg).await
+    }
+
+    async fn send_push(&self, mut msg: Push, reliability: zenoh_protocol::core::Reliability) -> bool {
+        self.handle_namespace_ingress(&mut msg.wire_expr, None)
+            && self.primitives.send_push(msg, reliability).await
+    }
+
+    async fn send_request(&self, mut msg: Request) -> bool {
+        self.handle_namespace_ingress(&mut msg.wire_expr, None) && self.primitives.send_request(msg).await
+    }
+
+    async fn send_response(&self, mut msg: Response) -> bool {
+        self.handle_namespace_ingress(&mut msg.wire_expr, None)
+            && self.primitives.send_response(msg).await
+    }
+
+    async fn send_response_final(&self, msg: ResponseFinal) -> bool {
+        self.primitives.send_response_final(msg).await
+    }
+
+    async fn close(&self) {
+        self.primitives.close().await
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
-    }
-
-    fn send_interest(
-        &self,
-        ctx: super::RoutingContext<&mut zenoh_protocol::network::Interest>,
-    ) -> bool {
-        self.handle_interest_ingress(ctx.msg) && self.primitives.send_interest(ctx)
-    }
-
-    fn send_declare(
-        &self,
-        ctx: super::RoutingContext<&mut zenoh_protocol::network::Declare>,
-    ) -> bool {
-        self.handle_declare_ingress(ctx.msg) && self.primitives.send_declare(ctx)
-    }
-
-    fn send_push(&self, msg: &mut Push, reliability: zenoh_protocol::core::Reliability) -> bool {
-        self.handle_namespace_ingress(&mut msg.wire_expr, None)
-            && self.primitives.send_push(msg, reliability)
-    }
-
-    fn send_request(&self, msg: &mut Request) -> bool {
-        self.handle_namespace_ingress(&mut msg.wire_expr, None) && self.primitives.send_request(msg)
-    }
-
-    fn send_response(&self, msg: &mut Response) -> bool {
-        self.handle_namespace_ingress(&mut msg.wire_expr, None)
-            && self.primitives.send_response(msg)
-    }
-
-    fn send_response_final(&self, msg: &mut ResponseFinal) -> bool {
-        self.primitives.send_response_final(msg)
     }
 }

@@ -267,27 +267,38 @@ impl Resolvable for ReplyErrBuilder<'_> {
 
 impl Wait for ReplyErrBuilder<'_> {
     fn wait(self) -> <Self as Resolvable>::To {
-        self.query.inner.primitives.send_response(&mut Response {
-            rid: self.query.inner.qid,
-            wire_expr: WireExpr {
-                scope: 0,
-                suffix: std::borrow::Cow::Owned(self.query.key_expr().as_str().to_owned()),
-                mapping: Mapping::Sender,
-            },
-            payload: ResponseBody::Err(zenoh::Err {
-                encoding: self.encoding.into(),
-                ext_sinfo: None,
-                #[cfg(feature = "shared-memory")]
-                ext_shm: None,
-                ext_unknown: vec![],
-                payload: self.payload.into(),
-            }),
-            ext_qos: self.query.inner.qos.into(),
-            ext_tstamp: None,
-            ext_respid: Some(response::ext::ResponderIdType {
-                zid: self.query.inner.zid,
-                eid: self.query.eid,
-            }),
+        let primitives = self.query.inner.primitives.clone();
+        let qid = self.query.inner.qid;
+        let key_expr = self.query.key_expr().as_str().to_owned();
+        let zid = self.query.inner.zid;
+        let eid = self.query.eid;
+        let qos = self.query.inner.qos;
+        let encoding = self.encoding;
+        let payload = self.payload;
+        tokio::spawn(async move {
+            primitives.send_response(Response {
+                rid: qid,
+                wire_expr: WireExpr {
+                    scope: 0,
+                    suffix: std::borrow::Cow::Owned(key_expr),
+                    mapping: Mapping::Sender,
+                },
+                payload: ResponseBody::Err(zenoh::Err {
+                    encoding: encoding.into(),
+                    ext_sinfo: None,
+                    #[cfg(feature = "shared-memory")]
+                    ext_shm: None,
+                    ext_unknown: vec![],
+                    payload: payload.into(),
+                }),
+                ext_qos: qos.into(),
+                ext_tstamp: None,
+                ext_respid: Some(response::ext::ResponderIdType {
+                    zid,
+                    eid,
+                }),
+            }).await;
+        });
         });
         Ok(())
     }

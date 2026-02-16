@@ -18,10 +18,13 @@ use std::{
     fmt::Debug,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Mutex, RwLock,
+        Arc,
     },
     time::Duration,
 };
+
+use async_lock::{Mutex, RwLock};
+use zenoh_core::{zasyncread, zasyncwrite};
 
 use uhlc::HLC;
 use zenoh_config::{unwrap_or_default, Config};
@@ -523,8 +526,8 @@ impl Debug for Tables {
 
 impl TablesLock {
     #[allow(dead_code)]
-    pub(crate) fn update_config(&self, config: &Config) -> ZResult<()> {
-        let mut tables = zwrite!(self.tables);
+    pub(crate) async fn update_config(&self, config: &Config) -> ZResult<()> {
+        let mut tables = zasyncwrite!(self.tables);
         #[cfg(feature = "stats")]
         {
             let tables = &mut *tables;
@@ -535,7 +538,7 @@ impl TablesLock {
         }
         tables.data.interceptors = interceptor_factories(config)?;
         drop(tables);
-        let tables = zread!(self.tables);
+        let tables = zasyncread!(self.tables);
         let version = tables
             .data
             .next_interceptor_version

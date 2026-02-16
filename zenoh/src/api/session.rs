@@ -1277,20 +1277,20 @@ impl Session {
     /// let key_expr = session.declare_keyexpr("key/expression").await.unwrap();
     /// # }
     /// ```
-    pub fn declare_keyexpr<'a, 'b: 'a, TryIntoKeyExpr>(
+    pub async fn declare_keyexpr<'a, 'b: 'a, TryIntoKeyExpr>(
         &'a self,
         key_expr: TryIntoKeyExpr,
-    ) -> impl Resolve<ZResult<KeyExpr<'b>>> + 'a
+    ) -> ZResult<KeyExpr<'b>>
     where
         TryIntoKeyExpr: TryInto<KeyExpr<'b>>,
         <TryIntoKeyExpr as TryInto<KeyExpr<'b>>>::Error: Into<zenoh_result::Error>,
     {
-        let key_expr: ZResult<KeyExpr> = key_expr.try_into().map_err(Into::into);
-        ResolveClosure::new(move || key_expr?.declare(self, true))
+        let key_expr: KeyExpr = key_expr.try_into().map_err(Into::into)?;
+        key_expr.declare(self, true).await
     }
 
-    pub(crate) fn declare_nonwild_prefix<'a>(&self, key_expr: KeyExpr<'a>) -> ZResult<KeyExpr<'a>> {
-        key_expr.declare_nonwild_prefix(self, false)
+    pub(crate) async fn declare_nonwild_prefix<'a>(&self, key_expr: KeyExpr<'a>) -> ZResult<KeyExpr<'a>> {
+        key_expr.declare_nonwild_prefix(self, false).await
     }
 
     /// Publish [`SampleKind::Put`] sample directly from the session. This is a shortcut for declaring
@@ -1463,12 +1463,11 @@ impl Session {
         Duration::from_millis(self.0.runtime.get_config().queries_default_timeout_ms())
     }
 
-    pub(crate) fn declare_prefix<'a>(
-        &'a self,
-        prefix: &'a str,
+    pub(crate) async fn declare_prefix(
+        &self,
+        prefix: &str,
         force: bool,
-    ) -> impl Resolve<ZResult<Option<ExprId>>> + 'a {
-        ResolveClosure::new(move || {
+    ) -> ZResult<Option<ExprId>> {
             trace!("declare_prefix({:?})", prefix);
             let mut state = zwrite!(self.0.state);
             let primitives = state.primitives()?;
@@ -1506,7 +1505,7 @@ impl Session {
                         },
                     );
                     drop(state);
-                    primitives.send_declare(&mut Declare {
+                    primitives.send_declare(Declare {
                         interest_id: None,
                         ext_qos: declare::ext::QoSType::DECLARE,
                         ext_tstamp: None,
@@ -1519,7 +1518,7 @@ impl Session {
                                 mapping: Mapping::Sender,
                             },
                         }),
-                    });
+                    }).await;
                     let mut state = zwrite!(self.0.state);
                     if let Some(res) = state.local_resources.get_mut(&expr_id) {
                         res.declared = true;
@@ -1527,7 +1526,6 @@ impl Session {
                     Ok(Some(expr_id))
                 }
             }
-        })
     }
 
     pub(crate) fn undeclare_prefix(&self, expr_id: ExprId) -> ZResult<()> {
@@ -1539,12 +1537,14 @@ impl Session {
             if entry.count == 0 {
                 state.local_resources.remove(&expr_id);
                 drop(state);
-                primitives.send_declare(&mut Declare {
-                    interest_id: None,
-                    ext_qos: declare::ext::QoSType::DECLARE,
-                    ext_tstamp: None,
-                    ext_nodeid: declare::ext::NodeIdType::DEFAULT,
-                    body: DeclareBody::UndeclareKeyExpr(UndeclareKeyExpr { id: expr_id }),
+                tokio::spawn(async move {
+                    primitives.send_declare(Declare {
+                        interest_id: None,
+                        ext_qos: declare::ext::QoSType::DECLARE,
+                        ext_tstamp: None,
+                        ext_nodeid: declare::ext::NodeIdType::DEFAULT,
+                        body: DeclareBody::UndeclareKeyExpr(UndeclareKeyExpr { id: expr_id }),
+                    }).await;
                 });
             }
             Ok(())
@@ -1608,15 +1608,18 @@ impl Session {
 
         if let Some(res) = declared_pub {
             let primitives = state.primitives()?;
+            let wire_expr = Some(res.to_wire(self).to_owned());
             drop(state);
-            primitives.send_interest(&mut Interest {
-                id,
-                mode: InterestMode::CurrentFuture,
-                options: InterestOptions::KEYEXPRS + InterestOptions::SUBSCRIBERS,
-                wire_expr: Some(res.to_wire(self).to_owned()),
-                ext_qos: network::ext::QoSType::DEFAULT,
-                ext_tstamp: None,
-                ext_nodeid: interest::ext::NodeIdType::DEFAULT,
+            tokio::spawn(async move {
+                primitives.send_interest(Interest {
+                    id,
+                    mode: InterestMode::CurrentFuture,
+                    options: InterestOptions::KEYEXPRS + InterestOptions::SUBSCRIBERS,
+                    wire_expr,
+                    ext_qos: network::ext::QoSType::DEFAULT,
+                    ext_tstamp: None,
+                    ext_nodeid: interest::ext::NodeIdType::DEFAULT,
+                }).await;
             });
         }
         Ok(id)
@@ -1636,16 +1639,19 @@ impl Session {
                     p.destination != Locality::SessionLocal && p.remote_id == pub_state.remote_id
                 }) {
                     drop(state);
-                    primitives.send_interest(&mut Interest {
-                        id: pub_state.remote_id,
-                        mode: InterestMode::Final,
-                        // Note: InterestMode::Final options are undefined in the current protocol specification,
-                        //       they are initialized here for internal use by local egress interceptors.
-                        options: InterestOptions::SUBSCRIBERS,
-                        wire_expr: None,
-                        ext_qos: interest::ext::QoSType::DEFAULT,
-                        ext_tstamp: None,
-                        ext_nodeid: interest::ext::NodeIdType::DEFAULT,
+                    let remote_id = pub_state.remote_id;
+                    tokio::spawn(async move {
+                        primitives.send_interest(Interest {
+                            id: remote_id,
+                            mode: InterestMode::Final,
+                            // Note: InterestMode::Final options are undefined in the current protocol specification,
+                            //       they are initialized here for internal use by local egress interceptors.
+                            options: InterestOptions::SUBSCRIBERS,
+                            wire_expr: None,
+                            ext_qos: interest::ext::QoSType::DEFAULT,
+                            ext_tstamp: None,
+                            ext_nodeid: interest::ext::NodeIdType::DEFAULT,
+                        }).await;
                     });
                 }
             }
@@ -1666,15 +1672,18 @@ impl Session {
         let id = self.0.runtime.next_id();
         let declared_querier = state.register_querier(id, &key_expr, destination);
         if let Some(res) = declared_querier {
+            let wire_expr = Some(res.to_wire(self).to_owned());
             drop(state);
-            primitives.send_interest(&mut Interest {
-                id,
-                mode: InterestMode::CurrentFuture,
-                options: InterestOptions::KEYEXPRS + InterestOptions::QUERYABLES,
-                wire_expr: Some(res.to_wire(self).to_owned()),
-                ext_qos: interest::ext::QoSType::DEFAULT,
-                ext_tstamp: None,
-                ext_nodeid: interest::ext::NodeIdType::DEFAULT,
+            tokio::spawn(async move {
+                primitives.send_interest(Interest {
+                    id,
+                    mode: InterestMode::CurrentFuture,
+                    options: InterestOptions::KEYEXPRS + InterestOptions::QUERYABLES,
+                    wire_expr,
+                    ext_qos: interest::ext::QoSType::DEFAULT,
+                    ext_tstamp: None,
+                    ext_nodeid: interest::ext::NodeIdType::DEFAULT,
+                }).await;
             });
         }
         Ok(id)
@@ -1699,14 +1708,17 @@ impl Session {
                         && p.remote_id == querier_state.remote_id
                 }) {
                     drop(state);
-                    primitives.send_interest(&mut Interest {
-                        id: querier_state.remote_id,
-                        mode: InterestMode::Final,
-                        options: InterestOptions::empty(),
-                        wire_expr: None,
-                        ext_qos: interest::ext::QoSType::DEFAULT,
-                        ext_tstamp: None,
-                        ext_nodeid: interest::ext::NodeIdType::DEFAULT,
+                    let remote_id = querier_state.remote_id;
+                    tokio::spawn(async move {
+                        primitives.send_interest(Interest {
+                            id: remote_id,
+                            mode: InterestMode::Final,
+                            options: InterestOptions::empty(),
+                            wire_expr: None,
+                            ext_qos: interest::ext::QoSType::DEFAULT,
+                            ext_tstamp: None,
+                            ext_nodeid: interest::ext::NodeIdType::DEFAULT,
+                        }).await;
                     });
                 }
             }
@@ -1747,12 +1759,15 @@ impl Session {
         if let Some(key_expr) = declared_sub {
             drop(state);
             let wire_expr = key_expr.to_wire(self).to_owned();
-            primitives.send_declare(&mut Declare {
-                interest_id: None,
-                ext_qos: declare::ext::QoSType::DECLARE,
-                ext_tstamp: None,
-                ext_nodeid: declare::ext::NodeIdType::DEFAULT,
-                body: DeclareBody::DeclareSubscriber(DeclareSubscriber { id, wire_expr }),
+
+            tokio::spawn(async move {
+                primitives.send_declare(Declare {
+                    interest_id: None,
+                    ext_qos: declare::ext::QoSType::DECLARE,
+                    ext_tstamp: None,
+                    ext_nodeid: declare::ext::NodeIdType::DEFAULT,
+                    body: DeclareBody::DeclareSubscriber(DeclareSubscriber { id, wire_expr }),
+                }).await;
             });
             let state = zread!(self.0.state);
             self.update_matching_status(&state, &key_expr, MatchingStatusType::Subscribers, true)
@@ -1796,17 +1811,20 @@ impl Session {
                             s.origin != Locality::SessionLocal && s.remote_id == sub_state.remote_id
                         }) {
                             drop(state);
-                            primitives.send_declare(&mut Declare {
-                                interest_id: None,
-                                ext_qos: declare::ext::QoSType::DECLARE,
-                                ext_tstamp: None,
-                                ext_nodeid: declare::ext::NodeIdType::DEFAULT,
-                                body: DeclareBody::UndeclareSubscriber(UndeclareSubscriber {
-                                    id: sub_state.remote_id,
-                                    ext_wire_expr: WireExprType {
-                                        wire_expr: WireExpr::empty(),
-                                    },
-                                }),
+                            let remote_id = sub_state.remote_id;
+                            tokio::spawn(async move {
+                                primitives.send_declare(Declare {
+                                    interest_id: None,
+                                    ext_qos: declare::ext::QoSType::DECLARE,
+                                    ext_tstamp: None,
+                                    ext_nodeid: declare::ext::NodeIdType::DEFAULT,
+                                    body: DeclareBody::UndeclareSubscriber(UndeclareSubscriber {
+                                        id: remote_id,
+                                        ext_wire_expr: WireExprType {
+                                            wire_expr: WireExpr::empty(),
+                                        },
+                                    }),
+                                }).await;
                             });
                             let state = zread!(self.0.state);
                             self.update_matching_status(
@@ -1835,16 +1853,19 @@ impl Session {
                     let primitives = state.primitives()?;
                     drop(state);
 
-                    primitives.send_interest(&mut Interest {
-                        id: sub_state.id,
-                        mode: InterestMode::Final,
-                        // Note: InterestMode::Final options are undefined in the current protocol specification,
-                        //       they are initialized here for internal use by local egress interceptors.
-                        options: InterestOptions::TOKENS,
-                        wire_expr: None,
-                        ext_qos: interest::ext::QoSType::DEFAULT,
-                        ext_tstamp: None,
-                        ext_nodeid: interest::ext::NodeIdType::DEFAULT,
+                    let id = sub_state.id;
+                    tokio::spawn(async move {
+                        primitives.send_interest(Interest {
+                            id,
+                            mode: InterestMode::Final,
+                            // Note: InterestMode::Final options are undefined in the current protocol specification,
+                            //       they are initialized here for internal use by local egress interceptors.
+                            options: InterestOptions::TOKENS,
+                            wire_expr: None,
+                            ext_qos: interest::ext::QoSType::DEFAULT,
+                            ext_tstamp: None,
+                            ext_nodeid: interest::ext::NodeIdType::DEFAULT,
+                        }).await;
                     });
                 }
             }
@@ -1888,16 +1909,18 @@ impl Session {
                 distance: 0,
             };
             let wire_expr = key_expr.to_wire(self).to_owned();
-            primitives.send_declare(&mut Declare {
-                interest_id: None,
-                ext_qos: declare::ext::QoSType::DECLARE,
-                ext_tstamp: None,
-                ext_nodeid: declare::ext::NodeIdType::DEFAULT,
-                body: DeclareBody::DeclareQueryable(DeclareQueryable {
-                    id,
-                    wire_expr,
-                    ext_info: qabl_info,
-                }),
+            tokio::spawn(async move {
+                primitives.send_declare(Declare {
+                    interest_id: None,
+                    ext_qos: declare::ext::QoSType::DECLARE,
+                    ext_tstamp: None,
+                    ext_nodeid: declare::ext::NodeIdType::DEFAULT,
+                    body: DeclareBody::DeclareQueryable(DeclareQueryable {
+                        id,
+                        wire_expr,
+                        ext_info: qabl_info,
+                    }),
+                }).await;
             });
         } else {
             drop(state);
@@ -1923,17 +1946,20 @@ impl Session {
             trace!("undeclare_queryable({:?})", qable_state);
             if qable_state.origin != Locality::SessionLocal {
                 drop(state);
-                primitives.send_declare(&mut Declare {
-                    interest_id: None,
-                    ext_qos: declare::ext::QoSType::DECLARE,
-                    ext_tstamp: None,
-                    ext_nodeid: declare::ext::NodeIdType::DEFAULT,
-                    body: DeclareBody::UndeclareQueryable(UndeclareQueryable {
-                        id: qable_state.id,
-                        ext_wire_expr: WireExprType {
-                            wire_expr: WireExpr::empty(),
-                        },
-                    }),
+                let id = qable_state.id;
+                tokio::spawn(async move {
+                    primitives.send_declare(Declare {
+                        interest_id: None,
+                        ext_qos: declare::ext::QoSType::DECLARE,
+                        ext_tstamp: None,
+                        ext_nodeid: declare::ext::NodeIdType::DEFAULT,
+                        body: DeclareBody::UndeclareQueryable(UndeclareQueryable {
+                            id,
+                            ext_wire_expr: WireExprType {
+                                wire_expr: WireExpr::empty(),
+                            },
+                        }),
+                    }).await;
                 });
             } else {
                 drop(state);
@@ -1960,15 +1986,18 @@ impl Session {
         tracing::trace!("declare_liveliness({:?})", key_expr);
         let id = self.0.runtime.next_id();
         let primitives = zread!(self.0.state).primitives()?;
-        primitives.send_declare(&mut Declare {
-            interest_id: None,
-            ext_qos: declare::ext::QoSType::DECLARE,
-            ext_tstamp: None,
-            ext_nodeid: declare::ext::NodeIdType::DEFAULT,
-            body: DeclareBody::DeclareToken(DeclareToken {
-                id,
-                wire_expr: key_expr.to_wire(self).to_owned(),
-            }),
+        let wire_expr = key_expr.to_wire(self).to_owned();
+        tokio::spawn(async move {
+            primitives.send_declare(Declare {
+                interest_id: None,
+                ext_qos: declare::ext::QoSType::DECLARE,
+                ext_tstamp: None,
+                ext_nodeid: declare::ext::NodeIdType::DEFAULT,
+                body: DeclareBody::DeclareToken(DeclareToken {
+                    id,
+                    wire_expr,
+                }),
+            }).await;
         });
         Ok(id)
     }
@@ -2059,18 +2088,24 @@ impl Session {
                 });
         }
 
-        primitives.send_interest(&mut Interest {
-            id,
-            mode: if history {
-                InterestMode::CurrentFuture
-            } else {
-                InterestMode::Future
-            },
-            options: InterestOptions::KEYEXPRS + InterestOptions::TOKENS,
-            wire_expr: Some(key_expr.to_wire(self).to_owned()),
-            ext_qos: interest::ext::QoSType::INTEREST,
-            ext_tstamp: None,
-            ext_nodeid: interest::ext::NodeIdType::DEFAULT,
+        let mode = if history {
+            InterestMode::CurrentFuture
+        } else {
+            InterestMode::Future
+        };
+        let wire_expr = Some(key_expr.to_wire(self).to_owned());
+        tokio::spawn(async move {
+            primitives
+                .send_interest(Interest {
+                    id,
+                    mode,
+                    options: InterestOptions::KEYEXPRS + InterestOptions::TOKENS,
+                    wire_expr,
+                    ext_qos: interest::ext::QoSType::INTEREST,
+                    ext_tstamp: None,
+                    ext_nodeid: interest::ext::NodeIdType::DEFAULT,
+                })
+                .await;
         });
 
         Ok(sub_state)
@@ -2081,15 +2116,19 @@ impl Session {
             return Ok(());
         };
         trace!("undeclare_liveliness({:?})", tid);
-        primitives.send_declare(&mut Declare {
-            interest_id: None,
-            ext_qos: ext::QoSType::DECLARE,
-            ext_tstamp: None,
-            ext_nodeid: ext::NodeIdType::DEFAULT,
-            body: DeclareBody::UndeclareToken(UndeclareToken {
-                id: tid,
-                ext_wire_expr: WireExprType::null(),
-            }),
+        tokio::spawn(async move {
+            primitives
+                .send_declare(Declare {
+                    interest_id: None,
+                    ext_qos: ext::QoSType::DECLARE,
+                    ext_tstamp: None,
+                    ext_nodeid: ext::NodeIdType::DEFAULT,
+                    body: DeclareBody::UndeclareToken(UndeclareToken {
+                        id: tid,
+                        ext_wire_expr: WireExprType::null(),
+                    }),
+                })
+                .await;
         });
         Ok(())
     }
@@ -2513,14 +2552,14 @@ impl Session {
         };
         let has_local_callbacks = !callbacks.is_empty();
         if destination != Locality::SessionLocal {
-            primitives.send_push_consume(
-                &mut push,
-                #[cfg(feature = "unstable")]
-                reliability,
-                #[cfg(not(feature = "unstable"))]
-                Reliability::DEFAULT,
-                !has_local_callbacks,
-            );
+            let push_msg = push.clone();
+            #[cfg(feature = "unstable")]
+            let rel = reliability;
+            #[cfg(not(feature = "unstable"))]
+            let rel = Reliability::DEFAULT;
+            tokio::spawn(async move {
+                primitives.send_push(push_msg, rel).await;
+            });
         }
         if has_local_callbacks {
             #[cold]
@@ -2704,31 +2743,39 @@ impl Session {
         if destination != Locality::SessionLocal {
             let wexpr = key_expr.to_wire(self).to_owned();
             let ext_attachment = attachment.clone().map(Into::into);
-            primitives.send_request(&mut Request {
-                id: qid,
-                wire_expr: wexpr.clone(),
-                ext_qos: qos.into(),
-                ext_tstamp: None,
-                ext_nodeid: request::ext::NodeIdType::DEFAULT,
-                ext_target: target,
-                ext_budget: None,
-                ext_timeout: Some(timeout),
-                payload: RequestBody::Query(zenoh_protocol::zenoh::Query {
-                    consolidation,
-                    parameters: parameters.to_string(),
-                    #[cfg(feature = "unstable")]
-                    ext_sinfo: source.clone().map(Into::into),
-                    #[cfg(not(feature = "unstable"))]
-                    ext_sinfo: None,
-                    ext_body: value.as_ref().map(|v| query::ext::QueryBodyType {
-                        #[cfg(feature = "shared-memory")]
-                        ext_shm: None,
-                        encoding: v.1.clone().into(),
-                        payload: v.0.clone().into(),
-                    }),
-                    ext_attachment,
-                    ext_unknown: vec![],
-                }),
+            let ext_qos = qos.into();
+            let params = parameters.to_string();
+            #[cfg(feature = "unstable")]
+            let ext_sinfo = source.clone().map(Into::into);
+            #[cfg(not(feature = "unstable"))]
+            let ext_sinfo = None;
+            let ext_body = value.as_ref().map(|v| query::ext::QueryBodyType {
+                #[cfg(feature = "shared-memory")]
+                ext_shm: None,
+                encoding: v.1.clone().into(),
+                payload: v.0.clone().into(),
+            });
+            tokio::spawn(async move {
+                primitives
+                    .send_request(Request {
+                        id: qid,
+                        wire_expr: wexpr.clone(),
+                        ext_qos,
+                        ext_tstamp: None,
+                        ext_nodeid: request::ext::NodeIdType::DEFAULT,
+                        ext_target: target,
+                        ext_budget: None,
+                        ext_timeout: Some(timeout),
+                        payload: RequestBody::Query(zenoh_protocol::zenoh::Query {
+                            consolidation,
+                            parameters: params,
+                            ext_sinfo,
+                            ext_body,
+                            ext_attachment,
+                            ext_unknown: vec![],
+                        }),
+                    })
+                    .await;
             });
         }
         if destination != Locality::Remote {
@@ -2829,14 +2876,19 @@ impl Session {
             .insert(id, LivelinessQueryState { callback });
         drop(state);
 
-        primitives.send_interest(&mut Interest {
-            id,
-            mode: InterestMode::Current,
-            options: InterestOptions::KEYEXPRS + InterestOptions::TOKENS,
-            wire_expr: Some(wexpr.clone()),
-            ext_qos: interest::ext::QoSType::DEFAULT,
-            ext_tstamp: None,
-            ext_nodeid: interest::ext::NodeIdType::DEFAULT,
+        let wire_expr = Some(wexpr.clone());
+        tokio::spawn(async move {
+            primitives
+                .send_interest(Interest {
+                    id,
+                    mode: InterestMode::Current,
+                    options: InterestOptions::KEYEXPRS + InterestOptions::TOKENS,
+                    wire_expr,
+                    ext_qos: interest::ext::QoSType::DEFAULT,
+                    ext_tstamp: None,
+                    ext_nodeid: interest::ext::NodeIdType::DEFAULT,
+                })
+                .await;
         });
 
         Ok(())
@@ -2940,17 +2992,23 @@ impl Session {
     }
 }
 
+#[async_trait]
 impl Primitives for WeakSession {
-    fn send_interest(&self, msg: &mut zenoh_protocol::network::Interest) {
+    async fn send_interest(&self, mut msg: zenoh_protocol::network::Interest) -> bool {
         trace!("recv Interest {} {:?}", msg.id, msg.wire_expr);
+        true
     }
-    fn send_declare(&self, msg: &mut zenoh_protocol::network::Declare) {
+
+    async fn send_declare(&self, mut msg: zenoh_protocol::network::Declare) -> bool {
+        // Note: This implementation still uses blocking locks (zwrite!/zread!)
+        // since it's in the API layer, not the hot-path routing layer.
+        // The routing layer uses async locks for non-blocking operation.
         match &mut msg.body {
             zenoh_protocol::network::DeclareBody::DeclareKeyExpr(m) => {
                 trace!("recv DeclareKeyExpr {} {:?}", m.id, m.wire_expr);
                 let state = &mut zwrite!(self.0.state);
                 if state.primitives.is_none() {
-                    return; // Session closing or closed
+                    return false; // Session closing or closed
                 }
                 match state.remote_key_to_expr(&m.wire_expr) {
                     Ok(key_expr) => {
@@ -2984,7 +3042,7 @@ impl Primitives for WeakSession {
                 {
                     let mut state = zwrite!(self.0.state);
                     if state.primitives.is_none() {
-                        return; // Session closing or closed
+                        return false; // Session closing or closed
                     }
                     match state
                         .wireexpr_to_keyexpr(&m.wire_expr, false)
@@ -3012,7 +3070,7 @@ impl Primitives for WeakSession {
                 trace!("recv UndeclareSubscriber {:?}", m.id);
                 let mut state = zwrite!(self.0.state);
                 if state.primitives.is_none() {
-                    return; // Session closing or closed
+                    return false; // Session closing or closed
                 }
                 if let Some(expr) = state.remote_subscribers.remove(&m.id) {
                     self.update_matching_status(
@@ -3030,7 +3088,7 @@ impl Primitives for WeakSession {
                 {
                     let mut state = zwrite!(self.0.state);
                     if state.primitives.is_none() {
-                        return; // Session closing or closed
+                        return false; // Session closing or closed
                     }
                     match state
                         .wireexpr_to_keyexpr(&m.wire_expr, false)
@@ -3068,7 +3126,7 @@ impl Primitives for WeakSession {
                 trace!("recv UndeclareQueryable {:?}", m.id);
                 let mut state = zwrite!(self.0.state);
                 if state.primitives.is_none() {
-                    return; // Session closing or closed
+                    return false; // Session closing or closed
                 }
                 if let Some((expr, complete)) = state.remote_queryables.remove(&m.id) {
                     self.update_matching_status(
@@ -3086,7 +3144,7 @@ impl Primitives for WeakSession {
 
                 let mut state = zwrite!(self.0.state);
                 if state.primitives.is_none() {
-                    return; // Session closing or closed
+                    return false; // Session closing or closed
                 }
                 match state
                     .wireexpr_to_keyexpr(&m.wire_expr, false)
@@ -3114,7 +3172,7 @@ impl Primitives for WeakSession {
                                 };
 
                                 query.callback.call(reply);
-                                return;
+                                return false;
                             }
                         }
                         if let Entry::Vacant(e) = state.remote_tokens.entry(m.id) {
@@ -3145,7 +3203,7 @@ impl Primitives for WeakSession {
                 {
                     let mut state = zwrite!(self.0.state);
                     if state.primitives.is_none() {
-                        return; // Session closing or closed
+                        return false; // Session closing or closed
                     }
                     // interest_id is set if the Token is an Interest::Current.
                     // This is used to decide if liveliness subs with history=false should be called or not
@@ -3203,10 +3261,10 @@ impl Primitives for WeakSession {
                 let _ = state.liveliness_queries.remove(&interest_id);
             }
         }
+        true
     }
 
-    #[inline(always)]
-    fn send_push_consume(&self, msg: &mut Push, _reliability: Reliability, consume: bool) {
+    async fn send_push(&self, mut msg: Push, _reliability: Reliability) -> bool {
         trace!("recv Push {:?}", msg);
         let state = zread!(self.0.state);
         let callbacks =
@@ -3219,9 +3277,10 @@ impl Primitives for WeakSession {
             #[cfg(feature = "unstable")]
             _reliability,
         );
+        true
     }
 
-    fn send_request(&self, msg: &mut Request) {
+    async fn send_request(&self, mut msg: Request) -> bool {
         trace!("recv Request {:?}", msg);
         match &mut msg.payload {
             RequestBody::Query(m) => {
@@ -3252,15 +3311,16 @@ impl Primitives for WeakSession {
                 }
             }
         }
+        true
     }
 
-    fn send_response(&self, msg: &mut Response) {
+    async fn send_response(&self, mut msg: Response) -> bool {
         trace!("recv Response {:?}", msg);
         match &mut msg.payload {
             ResponseBody::Err(e) => {
                 let mut state = zwrite!(self.0.state);
                 if state.primitives.is_none() {
-                    return; // Session closing or closed
+                    return false; // Session closing or closed
                 }
                 match state.queries.get_mut(&msg.rid) {
                     Some(query) => {
@@ -3289,13 +3349,13 @@ impl Primitives for WeakSession {
             ResponseBody::Reply(m) => {
                 let mut state = zwrite!(self.0.state);
                 if state.primitives.is_none() {
-                    return; // Session closing or closed
+                    return false; // Session closing or closed
                 }
                 let key_expr = match state.remote_key_to_expr(&msg.wire_expr) {
                     Ok(key) => key.into_owned(),
                     Err(e) => {
                         error!("Received ReplyData for unknown key_expr: {}", e);
-                        return;
+                        return false;
                     }
                 };
                 match state.queries.get_mut(&msg.rid) {
@@ -3310,7 +3370,7 @@ impl Primitives for WeakSession {
                                 query.key_expr,
                                 query.parameters
                             );
-                            return;
+                            return false;
                         }
                         let new_reply = Reply {
                             result: Ok(Sample::from_push(
@@ -3419,13 +3479,14 @@ impl Primitives for WeakSession {
                 }
             }
         }
+        true
     }
 
-    fn send_response_final(&self, msg: &mut ResponseFinal) {
+    async fn send_response_final(&self, mut msg: ResponseFinal) -> bool {
         trace!("recv ResponseFinal {:?}", msg);
         let mut state = zwrite!(self.0.state);
         if state.primitives.is_none() {
-            return; // Session closing or closed
+            return false; // Session closing or closed
         }
         match state.queries.get_mut(&msg.rid) {
             Some(query) => {
@@ -3445,52 +3506,12 @@ impl Primitives for WeakSession {
                 warn!("Received ResponseFinal for unknown Request: {}", msg.rid);
             }
         }
+        true
     }
 
-    fn send_close(&self) {
+    async fn close(&self) {
         trace!("recv Close");
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-}
-
-impl crate::net::primitives::EPrimitives for WeakSession {
-    #[inline]
-    fn send_interest(&self, ctx: crate::net::routing::RoutingContext<&mut Interest>) -> bool {
-        (self as &dyn Primitives).send_interest(ctx.msg);
-        false
-    }
-
-    #[inline]
-    fn send_declare(&self, ctx: crate::net::routing::RoutingContext<&mut Declare>) -> bool {
-        (self as &dyn Primitives).send_declare(ctx.msg);
-        false
-    }
-
-    #[inline]
-    fn send_push(&self, msg: &mut Push, reliability: Reliability) -> bool {
-        (self as &dyn Primitives).send_push(msg, reliability);
-        false
-    }
-
-    #[inline]
-    fn send_request(&self, msg: &mut Request) -> bool {
-        (self as &dyn Primitives).send_request(msg);
-        false
-    }
-
-    #[inline]
-    fn send_response(&self, msg: &mut Response) -> bool {
-        (self as &dyn Primitives).send_response(msg);
-        false
-    }
-
-    #[inline]
-    fn send_response_final(&self, msg: &mut ResponseFinal) -> bool {
-        (self as &dyn Primitives).send_response_final(msg);
-        false
+        // Session cleanup handled by Session::close()
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -3584,7 +3605,7 @@ impl Closee for WeakSession {
             closee.close_inner(()).await;
         } else {
             self.0.task_controller.terminate_all_async().await;
-            primitives.send_close();
+            primitives.close().await;
         }
     }
 }

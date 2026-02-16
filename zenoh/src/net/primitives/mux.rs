@@ -17,7 +17,9 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-use arc_swap::ArcSwapOption;
+use arc_swap::ArcSwap;
+use async_trait::async_trait;
+use zenoh_core::zasyncread;
 use zenoh_protocol::{
     core::Reliability,
     network::{
@@ -27,7 +29,7 @@ use zenoh_protocol::{
 };
 use zenoh_transport::{multicast::TransportMulticast, unicast::TransportUnicast};
 
-use super::{EPrimitives, Primitives};
+use super::Primitives;
 use crate::net::routing::{
     dispatcher::face::{Face, WeakFace},
     gateway::{InterceptorCacheValueType, Resource},
@@ -81,13 +83,12 @@ struct MuxContext<'a> {
 }
 
 impl MuxContext<'_> {
-    fn prefix(&self, msg: &NetworkMessageMut) -> Option<Arc<Resource>> {
+    async fn prefix<'a>(&self, msg: &'a NetworkMessageMut<'a>) -> Option<Arc<Resource>> {
         if let Some(wire_expr) = msg.wire_expr() {
             let wire_expr = wire_expr.to_owned();
             if let Some(face) = self.mux.face.get().and_then(|f| f.upgrade()) {
-                let rtables = zread!(face.tables.tables);
-                if let Some(prefix) = rtables
-                    .data
+                let tables = zasyncread!(face.tables.tables);
+                if let Some(prefix) = tables
                     .get_sent_mapping(&face.state, &wire_expr.scope, wire_expr.mapping)
                     .cloned()
                 {
@@ -107,7 +108,8 @@ impl InterceptorContext for MuxContext<'_> {
     fn full_expr(&self, msg: &NetworkMessageMut) -> Option<&str> {
         if self.expr.get().is_none() {
             if let Some(wire_expr) = msg.wire_expr() {
-                if let Some(prefix) = self.prefix(msg) {
+                use futures::executor::block_on;
+                if let Some(prefix) = block_on(self.prefix(msg)) {
                     self.expr
                         .set(prefix.expr().to_string() + wire_expr.suffix.as_ref())
                         .ok();
@@ -118,7 +120,8 @@ impl InterceptorContext for MuxContext<'_> {
     }
     fn get_cache(&self, msg: &NetworkMessageMut) -> Option<&Box<dyn Any + Send + Sync>> {
         if self.cache.get().is_none() && msg.wire_expr().is_some_and(|we| !we.has_suffix()) {
-            if let Some(prefix) = self.prefix(msg) {
+            use futures::executor::block_on;
+            if let Some(prefix) = block_on(self.prefix(msg)) {
                 if let Some(face) = self.mux.face.get().and_then(|f| f.upgrade()) {
                     // TODO interceptor can change between the initial load and the cache load
                     if let Some(cache) = self
@@ -137,21 +140,27 @@ impl InterceptorContext for MuxContext<'_> {
     }
 }
 
-impl EPrimitives for Mux {
-    fn send_interest(&self, ctx: RoutingContext<&mut Interest>) -> bool {
-        let interest_id = ctx.msg.id;
+// New unified async Primitives implementation for Mux
+#[async_trait]
+impl Primitives for Mux {
+    async fn send_interest(&self, mut msg: Interest) -> bool {
+        let interest_id = msg.id;
 
-        let mut msg = NetworkMessageMut {
-            body: NetworkBodyMut::Interest(ctx.msg),
+        let mut net_msg = NetworkMessageMut {
+            body: NetworkBodyMut::Interest(&mut msg),
             reliability: Reliability::Reliable,
         };
         let mut ctx = RoutingContext {
             msg: (),
-            full_expr: ctx.full_expr,
+            full_expr: OnceCell::new(),
         };
 
-        if self.interceptor.load().intercept(&mut msg, &mut ctx) {
-            self.handler.schedule(msg).unwrap_or(false)
+        if self
+            .interceptor
+            .load()
+            .intercept(&mut net_msg, &mut ctx as &mut dyn InterceptorContext)
+        {
+            self.handler.schedule(net_msg).unwrap_or(false)
         } else {
             // send declare final to avoid timeout on blocked interest
             if let Some(face) = self.face.get().and_then(|f| f.upgrade()) {
@@ -161,64 +170,121 @@ impl EPrimitives for Mux {
         }
     }
 
-    fn send_declare(&self, ctx: RoutingContext<&mut Declare>) -> bool {
-        let mut msg = NetworkMessageMut {
-            body: NetworkBodyMut::Declare(ctx.msg),
+    async fn send_declare(&self, mut msg: Declare) -> bool {
+        let mut net_msg = NetworkMessageMut {
+            body: NetworkBodyMut::Declare(&mut msg),
             reliability: Reliability::Reliable,
         };
         let mut ctx = RoutingContext {
             msg: (),
-            full_expr: ctx.full_expr,
+            full_expr: OnceCell::new(),
         };
 
-        self.interceptor.load().intercept(&mut msg, &mut ctx)
-            && self.handler.schedule(msg).unwrap_or(false)
-    }
-
-    fn send_push(&self, msg: &mut Push, reliability: Reliability) -> bool {
-        let msg = NetworkMessageMut {
-            body: NetworkBodyMut::Push(msg),
-            reliability,
-        };
-        self.schedule(msg)
-    }
-
-    fn send_request(&self, msg: &mut Request) -> bool {
-        let qos = msg.ext_qos;
-        let request_id = msg.id;
-        let mut msg = NetworkMessageMut {
-            body: NetworkBodyMut::Request(msg),
-            reliability: Reliability::Reliable,
-        };
-        if self.can_schedule(&mut msg) {
-            self.handler.schedule(msg).unwrap_or(false)
+        if self
+            .interceptor
+            .load()
+            .intercept(&mut net_msg, &mut ctx as &mut dyn InterceptorContext)
+        {
+            self.handler.schedule(net_msg).unwrap_or(false)
         } else {
-            match self.face.get().and_then(|f| f.upgrade()) {
-                Some(face) => face.send_response_final(&mut ResponseFinal {
-                    rid: request_id,
-                    ext_qos: qos,
-                    ext_tstamp: None,
-                }),
-                None => tracing::error!("Uninitialized multiplexer!"),
-            }
             false
         }
     }
 
-    fn send_response(&self, msg: &mut Response) -> bool {
-        let msg = NetworkMessageMut {
-            body: NetworkBodyMut::Response(msg),
-            reliability: Reliability::Reliable,
+    async fn send_push(&self, mut msg: Push, reliability: Reliability) -> bool {
+        let mut net_msg = NetworkMessageMut {
+            body: NetworkBodyMut::Push(&mut msg),
+            reliability,
         };
-        self.schedule(msg)
+        let mut ctx = MuxContext {
+            mux: self,
+            cache: OnceCell::new(),
+            expr: OnceCell::new(),
+        };
+        let interceptor = self.interceptor.load();
+        if interceptor.interceptors.is_empty()
+            || interceptor.intercept(&mut net_msg, &mut ctx as &mut dyn InterceptorContext)
+        {
+            self.handler.schedule(net_msg).unwrap_or(false)
+        } else {
+            false
+        }
     }
 
-    fn send_response_final(&self, msg: &mut ResponseFinal) -> bool {
-        let msg = NetworkMessageMut {
-            body: NetworkBodyMut::ResponseFinal(msg),
+    async fn send_request(&self, mut msg: Request) -> bool {
+        let request_id = msg.id;
+        let mut net_msg = NetworkMessageMut {
+            body: NetworkBodyMut::Request(&mut msg),
             reliability: Reliability::Reliable,
         };
-        self.schedule(msg)
+        let mut ctx = MuxContext {
+            mux: self,
+            cache: OnceCell::new(),
+            expr: OnceCell::new(),
+        };
+        let interceptor = self.interceptor.load();
+        if interceptor.interceptors.is_empty() {
+            self.handler.schedule(net_msg).unwrap_or(false)
+        } else if let Some(face) = self.face.get().and_then(|f| f.upgrade()) {
+            if interceptor.intercept(&mut net_msg, &mut ctx as &mut dyn InterceptorContext) {
+                self.handler.schedule(net_msg).unwrap_or(false)
+            } else {
+                // request was blocked by an interceptor, send response final to avoid timeout
+                face.send_response_final(ResponseFinal {
+                    rid: request_id,
+                    ext_qos: response::ext::QoSType::RESPONSE_FINAL,
+                    ext_tstamp: None,
+                })
+                .await;
+                false
+            }
+        } else {
+            false
+        }
+    }
+
+    async fn send_response(&self, mut msg: Response) -> bool {
+        let mut net_msg = NetworkMessageMut {
+            body: NetworkBodyMut::Response(&mut msg),
+            reliability: Reliability::Reliable,
+        };
+        let mut ctx = MuxContext {
+            mux: self,
+            cache: OnceCell::new(),
+            expr: OnceCell::new(),
+        };
+        let interceptor = self.interceptor.load();
+        if interceptor.interceptors.is_empty()
+            || interceptor.intercept(&mut net_msg, &mut ctx as &mut dyn InterceptorContext)
+        {
+            self.handler.schedule(net_msg).unwrap_or(false)
+        } else {
+            false
+        }
+    }
+
+    async fn send_response_final(&self, mut msg: ResponseFinal) -> bool {
+        let mut net_msg = NetworkMessageMut {
+            body: NetworkBodyMut::ResponseFinal(&mut msg),
+            reliability: Reliability::Reliable,
+        };
+        let mut ctx = MuxContext {
+            mux: self,
+            cache: OnceCell::new(),
+            expr: OnceCell::new(),
+        };
+        let interceptor = self.interceptor.load();
+        if interceptor.interceptors.is_empty()
+            || interceptor.intercept(&mut net_msg, &mut ctx as &mut dyn InterceptorContext)
+        {
+            self.handler.schedule(net_msg).unwrap_or(false)
+        } else {
+            false
+        }
+    }
+
+    async fn close(&self) {
+        // Close implementation - currently no-op like send_close was
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -269,14 +335,12 @@ struct McastMuxContext<'a> {
 }
 
 impl McastMuxContext<'_> {
-    fn prefix(&self, msg: &NetworkMessageMut) -> Option<Arc<Resource>> {
+    async fn prefix<'a>(&self, msg: &'a NetworkMessageMut<'a>) -> Option<Arc<Resource>> {
         if let Some(wire_expr) = msg.wire_expr() {
             let wire_expr = wire_expr.to_owned();
             if let Some(face) = self.mux.face.get() {
-                let rtables = zread!(face.tables.tables);
-
-                if let Some(prefix) = rtables
-                    .data
+                let tables = zasyncread!(face.tables.tables);
+                if let Some(prefix) = tables
                     .get_sent_mapping(&face.state, &wire_expr.scope, wire_expr.mapping)
                     .cloned()
                 {
@@ -296,7 +360,8 @@ impl InterceptorContext for McastMuxContext<'_> {
     fn full_expr(&self, msg: &NetworkMessageMut) -> Option<&str> {
         if self.expr.get().is_none() {
             if let Some(wire_expr) = msg.wire_expr() {
-                if let Some(prefix) = self.prefix(msg) {
+                use futures::executor::block_on;
+                if let Some(prefix) = block_on(self.prefix(msg)) {
                     self.expr
                         .set(prefix.expr().to_string() + wire_expr.suffix.as_ref())
                         .ok();
@@ -307,7 +372,8 @@ impl InterceptorContext for McastMuxContext<'_> {
     }
     fn get_cache(&self, msg: &NetworkMessageMut) -> Option<&Box<dyn Any + Send + Sync>> {
         if self.cache.get().is_none() && msg.wire_expr().is_some_and(|we| !we.has_suffix()) {
-            if let Some(prefix) = self.prefix(msg) {
+            use futures::executor::block_on;
+            if let Some(prefix) = block_on(self.prefix(msg)) {
                 if let Some(face) = self.mux.face.get() {
                     // TODO interceptor can change between the initial load and the cache load
                     if let Some(cache) = self
@@ -326,21 +392,27 @@ impl InterceptorContext for McastMuxContext<'_> {
     }
 }
 
-impl EPrimitives for McastMux {
-    fn send_interest(&self, ctx: RoutingContext<&mut Interest>) -> bool {
-        let interest_id = ctx.msg.id;
+// New unified async Primitives implementation for McastMux
+#[async_trait]
+impl Primitives for McastMux {
+    async fn send_interest(&self, mut msg: Interest) -> bool {
+        let interest_id = msg.id;
 
-        let mut msg = NetworkMessageMut {
-            body: NetworkBodyMut::Interest(ctx.msg),
+        let mut net_msg = NetworkMessageMut {
+            body: NetworkBodyMut::Interest(&mut msg),
             reliability: Reliability::Reliable,
         };
         let mut ctx = RoutingContext {
             msg: (),
-            full_expr: ctx.full_expr,
+            full_expr: OnceCell::new(),
         };
 
-        if self.interceptor.load().intercept(&mut msg, &mut ctx) {
-            self.handler.schedule(msg).unwrap_or(false)
+        if self
+            .interceptor
+            .load()
+            .intercept(&mut net_msg, &mut ctx as &mut dyn InterceptorContext)
+        {
+            self.handler.schedule(net_msg).unwrap_or(false)
         } else {
             // send declare final to avoid timeout on blocked interest
             if let Some(face) = self.face.get() {
@@ -350,67 +422,121 @@ impl EPrimitives for McastMux {
         }
     }
 
-    fn send_declare(&self, ctx: RoutingContext<&mut Declare>) -> bool {
-        let mut msg = NetworkMessageMut {
-            body: NetworkBodyMut::Declare(ctx.msg),
+    async fn send_declare(&self, mut msg: Declare) -> bool {
+        let mut net_msg = NetworkMessageMut {
+            body: NetworkBodyMut::Declare(&mut msg),
             reliability: Reliability::Reliable,
         };
         let mut ctx = RoutingContext {
             msg: (),
-            full_expr: ctx.full_expr,
+            full_expr: OnceCell::new(),
         };
 
-        if self.interceptor.load().intercept(&mut msg, &mut ctx) {
-            self.handler.schedule(msg).unwrap_or(false)
+        if self
+            .interceptor
+            .load()
+            .intercept(&mut net_msg, &mut ctx as &mut dyn InterceptorContext)
+        {
+            self.handler.schedule(net_msg).unwrap_or(false)
         } else {
             false
         }
     }
 
-    fn send_push(&self, msg: &mut Push, reliability: Reliability) -> bool {
-        let msg = NetworkMessageMut {
-            body: NetworkBodyMut::Push(msg),
+    async fn send_push(&self, mut msg: Push, reliability: Reliability) -> bool {
+        let mut net_msg = NetworkMessageMut {
+            body: NetworkBodyMut::Push(&mut msg),
             reliability,
         };
-        self.schedule(msg)
-    }
-
-    fn send_request(&self, msg: &mut Request) -> bool {
-        let request_id = msg.id;
-        let qos = msg.ext_qos;
-        let mut msg = NetworkMessageMut {
-            body: NetworkBodyMut::Request(msg),
-            reliability: Reliability::Reliable,
+        let mut ctx = McastMuxContext {
+            mux: self,
+            cache: OnceCell::new(),
+            expr: OnceCell::new(),
         };
-        if self.can_schedule(&mut msg) {
-            self.handler.schedule(msg).unwrap_or(false)
+        let interceptor = self.interceptor.load();
+        if interceptor.interceptors.is_empty()
+            || interceptor.intercept(&mut net_msg, &mut ctx as &mut dyn InterceptorContext)
+        {
+            self.handler.schedule(net_msg).unwrap_or(false)
         } else {
-            match self.face.get() {
-                Some(face) => face.send_response_final(&mut ResponseFinal {
-                    rid: request_id,
-                    ext_qos: qos,
-                    ext_tstamp: None,
-                }),
-                None => tracing::error!("Uninitialized multiplexer!"),
-            }
             false
         }
     }
 
-    fn send_response(&self, msg: &mut Response) -> bool {
-        let msg = NetworkMessageMut {
-            body: NetworkBodyMut::Response(msg),
+    async fn send_request(&self, mut msg: Request) -> bool {
+        let request_id = msg.id;
+        let mut net_msg = NetworkMessageMut {
+            body: NetworkBodyMut::Request(&mut msg),
             reliability: Reliability::Reliable,
         };
-        self.schedule(msg)
+        let mut ctx = McastMuxContext {
+            mux: self,
+            cache: OnceCell::new(),
+            expr: OnceCell::new(),
+        };
+        let interceptor = self.interceptor.load();
+        if interceptor.interceptors.is_empty() {
+            self.handler.schedule(net_msg).unwrap_or(false)
+        } else if let Some(face) = self.face.get() {
+            if interceptor.intercept(&mut net_msg, &mut ctx as &mut dyn InterceptorContext) {
+                self.handler.schedule(net_msg).unwrap_or(false)
+            } else {
+                // request was blocked by an interceptor, send response final to avoid timeout
+                face.send_response_final(ResponseFinal {
+                    rid: request_id,
+                    ext_qos: response::ext::QoSType::RESPONSE_FINAL,
+                    ext_tstamp: None,
+                })
+                .await;
+                false
+            }
+        } else {
+            false
+        }
     }
 
-    fn send_response_final(&self, msg: &mut ResponseFinal) -> bool {
-        let msg = NetworkMessageMut {
-            body: NetworkBodyMut::ResponseFinal(msg),
+    async fn send_response(&self, mut msg: Response) -> bool {
+        let mut net_msg = NetworkMessageMut {
+            body: NetworkBodyMut::Response(&mut msg),
             reliability: Reliability::Reliable,
         };
-        self.schedule(msg)
+        let mut ctx = McastMuxContext {
+            mux: self,
+            cache: OnceCell::new(),
+            expr: OnceCell::new(),
+        };
+        let interceptor = self.interceptor.load();
+        if interceptor.interceptors.is_empty()
+            || interceptor.intercept(&mut net_msg, &mut ctx as &mut dyn InterceptorContext)
+        {
+            self.handler.schedule(net_msg).unwrap_or(false)
+        } else {
+            false
+        }
+    }
+
+    async fn send_response_final(&self, mut msg: ResponseFinal) -> bool {
+        let mut net_msg = NetworkMessageMut {
+            body: NetworkBodyMut::ResponseFinal(&mut msg),
+            reliability: Reliability::Reliable,
+        };
+        let mut ctx = McastMuxContext {
+            mux: self,
+            cache: OnceCell::new(),
+            expr: OnceCell::new(),
+        };
+        let interceptor = self.interceptor.load();
+        if interceptor.interceptors.is_empty()
+            || interceptor.intercept(&mut net_msg, &mut ctx as &mut dyn InterceptorContext)
+        {
+            self.handler.schedule(net_msg).unwrap_or(false)
+        } else {
+            false
+        }
+    }
+
+    async fn close(&self) {
+        // Close implementation - currently no-op
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

@@ -76,7 +76,7 @@ use zenoh_transport::{
 
 use self::orchestrator::StartConditions;
 use super::{
-    primitives::{DeMux, EPrimitives, Primitives},
+    primitives::{DeMux, Primitives},
     routing::{
         self,
         gateway::Gateway,
@@ -209,7 +209,7 @@ pub trait IRuntime: Send + Sync {
 
     fn new_primitives(
         &self,
-        e_primitives: Arc<dyn EPrimitives + Send + Sync>,
+        primitives: Arc<dyn Primitives>,
     ) -> (usize, Arc<dyn Primitives>);
 
     fn matching_status_remote(
@@ -350,7 +350,8 @@ impl IRuntime for RuntimeState {
             .map(|ns| (ns / key_expr.deref()).into());
 
         let router = self.router();
-        let tables = zread!(router.tables.tables);
+        use futures::executor::block_on;
+        let tables = block_on(router.tables.tables.read());
 
         let (broker_hat, other_hats) = tables
             .hats
@@ -398,7 +399,7 @@ impl IRuntime for RuntimeState {
 
     fn new_primitives(
         &self,
-        e_primitives: Arc<dyn EPrimitives + Send + Sync>,
+        primitives: Arc<dyn Primitives>,
     ) -> (usize, Arc<dyn Primitives>) {
         match &self.namespace {
             Some(ns) => {

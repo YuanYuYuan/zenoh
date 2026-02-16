@@ -458,7 +458,7 @@ impl Wait for PublisherBuilder<'_, '_> {
     fn wait(mut self) -> <Self as Resolvable>::To {
         self = self.apply_qos_overwrites();
         let mut key_expr = self.key_expr?;
-        key_expr = self.session.declare_keyexpr(key_expr).wait()?;
+        key_expr = futures::executor::block_on(self.session.declare_keyexpr(key_expr))?;
         let id = self
             .session
             .declare_publisher_inner(key_expr.clone(), self.destination)?;

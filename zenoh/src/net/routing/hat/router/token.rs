@@ -96,21 +96,26 @@ impl Hat {
                         {
                             let key_expr = Resource::decl_key(res, &mut someface);
                             tracing::debug!(dst = %someface);
-                            someface.primitives.send_declare(RoutingContext::with_expr(
-                                &mut Declare {
-                                    interest_id: None,
-                                    ext_qos: ext::QoSType::DECLARE,
-                                    ext_tstamp: None,
-                                    ext_nodeid: ext::NodeIdType {
-                                        node_id: routing_context,
+                            let primitives = someface.primitives.clone();
+                            let expr_str = res.expr().to_string();
+                            tokio::spawn(async move {
+                                let ctx = RoutingContext::with_expr(
+                                    Declare {
+                                        interest_id: None,
+                                        ext_qos: ext::QoSType::DECLARE,
+                                        ext_tstamp: None,
+                                        ext_nodeid: ext::NodeIdType {
+                                            node_id: routing_context,
+                                        },
+                                        body: DeclareBody::DeclareToken(DeclareToken {
+                                            id: TokenId::default(), // Sourced tokens do not use ids
+                                            wire_expr: key_expr,
+                                        }),
                                     },
-                                    body: DeclareBody::DeclareToken(DeclareToken {
-                                        id: TokenId::default(), // Sourced tokens do not use ids
-                                        wire_expr: key_expr,
-                                    }),
-                                },
-                                res.expr().to_string(),
-                            ));
+                                    expr_str,
+                                );
+                                primitives.send_declare(ctx.msg).await;
+                            });
                         } else {
                             tracing::trace!(
                                 face = %someface,
@@ -192,21 +197,26 @@ impl Hat {
                             let wire_expr = Resource::decl_key(res, &mut someface);
 
                             tracing::debug!(dst = %someface);
-                            someface.primitives.send_declare(RoutingContext::with_expr(
-                                &mut Declare {
-                                    interest_id: None,
-                                    ext_qos: ext::QoSType::DECLARE,
-                                    ext_tstamp: None,
-                                    ext_nodeid: ext::NodeIdType {
-                                        node_id: routing_context.unwrap_or(0),
+                            let primitives = someface.primitives.clone();
+                            let expr_str = res.expr().to_string();
+                            tokio::spawn(async move {
+                                let ctx = RoutingContext::with_expr(
+                                    Declare {
+                                        interest_id: None,
+                                        ext_qos: ext::QoSType::DECLARE,
+                                        ext_tstamp: None,
+                                        ext_nodeid: ext::NodeIdType {
+                                            node_id: routing_context.unwrap_or(0),
+                                        },
+                                        body: DeclareBody::UndeclareToken(UndeclareToken {
+                                            id: TokenId::default(), // Sourced tokens do not use ids
+                                            ext_wire_expr: WireExprType { wire_expr },
+                                        }),
                                     },
-                                    body: DeclareBody::UndeclareToken(UndeclareToken {
-                                        id: TokenId::default(), // Sourced tokens do not use ids
-                                        ext_wire_expr: WireExprType { wire_expr },
-                                    }),
-                                },
-                                res.expr().to_string(),
-                            ));
+                                    expr_str,
+                                );
+                                primitives.send_declare(ctx.msg).await;
+                            });
                         }
                     }
                     None => {

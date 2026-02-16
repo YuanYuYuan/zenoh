@@ -18,9 +18,11 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use async_trait::async_trait;
 use itertools::Itertools;
 use serde_json::json;
 use tracing::{error, trace};
+use zenoh_core::{zasynclock, zlock};
 use zenoh_buffers::buffer::SplitBuffer;
 use zenoh_config::{wrappers::ZenohId, ConfigValidator};
 use zenoh_core::Wait;
@@ -239,7 +241,10 @@ impl AdminSpace {
             context,
         });
 
-        config.set_plugin_validator(Arc::downgrade(&admin));
+        {
+            let config = &mut runtime.config().lock().0;
+            config.set_plugin_validator(Arc::downgrade(&admin));
+        }
 
         #[cfg(all(feature = "plugins", feature = "runtime_plugins"))]
         {
@@ -323,7 +328,7 @@ impl AdminSpace {
         let primitives = runtime.state.router.new_session(admin.clone());
         zlock!(admin.primitives).replace(primitives.clone());
 
-        primitives.send_declare(&mut Declare {
+        primitives.send_declare(Declare {
             interest_id: None,
             ext_qos: ext::QoSType::DECLARE,
             ext_tstamp: None,
@@ -333,9 +338,9 @@ impl AdminSpace {
                 wire_expr: [&root_key, "/**"].concat().into(),
                 ext_info: QueryableInfoType::DEFAULT,
             }),
-        });
+        }).await;
 
-        primitives.send_declare(&mut Declare {
+        primitives.send_declare(Declare {
             interest_id: None,
             ext_qos: ext::QoSType::DECLARE,
             ext_tstamp: None,
@@ -344,7 +349,7 @@ impl AdminSpace {
                 id: runtime.next_id(),
                 wire_expr: [&root_key, "/config/**"].concat().into(),
             }),
-        });
+        }).await;
     }
 
     pub fn key_expr_to_string<'a>(&self, key_expr: &'a WireExpr) -> ZResult<KeyExpr<'a>> {
@@ -364,12 +369,15 @@ impl AdminSpace {
     }
 }
 
+// Unified async Primitives implementation for AdminSpace
+#[async_trait]
 impl Primitives for AdminSpace {
-    fn send_interest(&self, msg: &mut Interest) {
+    async fn send_interest(&self, msg: Interest) -> bool {
         tracing::trace!("Recv interest {:?}", msg);
+        true
     }
 
-    fn send_declare(&self, msg: &mut Declare) {
+    async fn send_declare(&self, msg: Declare) -> bool {
         tracing::trace!("Recv declare {:?}", msg);
         if let DeclareBody::DeclareKeyExpr(m) = &msg.body {
             match self.key_expr_to_string(&m.wire_expr) {
@@ -379,9 +387,10 @@ impl Primitives for AdminSpace {
                 Err(e) => error!("Unknown expr_id {}! ({})", m.id, e),
             }
         }
+        true
     }
 
-    fn send_push_consume(&self, msg: &mut Push, _reliability: Reliability, _consume: bool) {
+    async fn send_push(&self, msg: Push, _reliability: Reliability) -> bool {
         trace!("recv Push {:?}", msg);
         {
             let conf = &self.context.runtime.state.config.lock();
@@ -390,7 +399,7 @@ impl Primitives for AdminSpace {
                     "Received PUT on '{}' but adminspace.permissions.write=false in configuration",
                     msg.wire_expr
                 );
-                return;
+                return false;
             }
         }
 
@@ -437,9 +446,10 @@ impl Primitives for AdminSpace {
                 }
             }
         }
+        true
     }
 
-    fn send_request(&self, msg: &mut Request) {
+    async fn send_request(&self, mut msg: Request) -> bool {
         trace!("recv Request {:?}", msg);
         match &mut msg.payload {
             RequestBody::Query(query) => {
@@ -447,32 +457,33 @@ impl Primitives for AdminSpace {
                     tracing::debug_span!("adminspace", zid = %ZenohIdProto::from(self.zid).short())
                         .entered();
                 let primitives = zlock!(self.primitives).as_ref().unwrap().clone();
-                {
+                let read_allowed = {
                     let conf = &self.context.runtime.state.config.lock();
-                    if !conf.adminspace.permissions().read {
-                        tracing::error!(
+                    conf.adminspace.permissions().read
+                };
+                if !read_allowed {
+                    tracing::error!(
                         "Received GET on '{}' but adminspace.permissions.read=false in configuration",
                         msg.wire_expr
                     );
-                        primitives.send_response_final(&mut ResponseFinal {
-                            rid: msg.id,
-                            ext_qos: msg.ext_qos,
-                            ext_tstamp: None,
-                        });
-                        return;
-                    }
+                    primitives.send_response_final(ResponseFinal {
+                        rid: msg.id,
+                        ext_qos: msg.ext_qos,
+                        ext_tstamp: None,
+                    }).await;
+                    return false;
                 }
 
                 let key_expr = match self.key_expr_to_string(&msg.wire_expr) {
                     Ok(key_expr) => key_expr.into_owned(),
                     Err(e) => {
                         tracing::error!("Unknown KeyExpr: {}", e);
-                        primitives.send_response_final(&mut ResponseFinal {
+                        primitives.send_response_final(ResponseFinal {
                             rid: msg.id,
                             ext_qos: msg.ext_qos,
                             ext_tstamp: None,
-                        });
-                        return;
+                        }).await;
+                        return false;
                     }
                 };
                 let zid = self.zid;
@@ -500,17 +511,20 @@ impl Primitives for AdminSpace {
                 }
             }
         }
+        true
     }
 
-    fn send_response(&self, msg: &mut Response) {
+    async fn send_response(&self, msg: Response) -> bool {
         trace!("recv Response {:?}", msg);
+        true
     }
 
-    fn send_response_final(&self, msg: &mut ResponseFinal) {
+    async fn send_response_final(&self, msg: ResponseFinal) -> bool {
         trace!("recv ResponseFinal {:?}", msg);
+        true
     }
 
-    fn send_close(&self) {
+    async fn close(&self) {
         trace!("recv Close");
     }
 
@@ -831,6 +845,7 @@ fn route_successor(prefix: &keyexpr, context: &AdminContext, query: Query) {
     };
     let tables = &context.runtime.state.router.tables;
     let rtables = zread!(tables.tables);
+
 
     // Try to shortcut full successor retrieval if suffix matches 'src/<zid>/dst/<zid>' pattern.
 

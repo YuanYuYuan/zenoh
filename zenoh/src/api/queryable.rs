@@ -51,15 +51,18 @@ use crate::{
     net::primitives::Primitives,
 };
 
+#[derive(Clone)]
 pub(crate) struct LocalReplyPrimitives {
     session: WeakSession,
 }
 
+#[derive(Clone)]
 pub(crate) struct RemoteReplyPrimitives {
     pub(crate) session: Option<WeakSession>,
     pub(crate) primitives: Arc<dyn Primitives>,
 }
 
+#[derive(Clone)]
 pub(crate) enum ReplyPrimitives {
     Local(LocalReplyPrimitives),
     Remote(RemoteReplyPrimitives),
@@ -80,18 +83,18 @@ impl ReplyPrimitives {
         })
     }
 
-    pub(crate) fn send_response_final(&self, msg: &mut ResponseFinal) {
+    pub(crate) async fn send_response_final(&self, msg: ResponseFinal) {
         match self {
-            ReplyPrimitives::Local(local) => local.session.send_response_final(msg),
-            ReplyPrimitives::Remote(remote) => remote.primitives.send_response_final(msg),
-        }
+            ReplyPrimitives::Local(local) => local.session.send_response_final(msg).await,
+            ReplyPrimitives::Remote(remote) => remote.primitives.send_response_final(msg).await,
+        };
     }
 
-    pub(crate) fn send_response(&self, msg: &mut Response) {
+    pub(crate) async fn send_response(&self, msg: Response) {
         match self {
-            ReplyPrimitives::Local(local) => local.session.send_response(msg),
-            ReplyPrimitives::Remote(remote) => remote.primitives.send_response(msg),
-        }
+            ReplyPrimitives::Local(local) => local.session.send_response(msg).await,
+            ReplyPrimitives::Remote(remote) => remote.primitives.send_response(msg).await,
+        };
     }
 
     pub(crate) fn keyexpr_to_wire(&self, key_expr: &KeyExpr) -> WireExpr<'static> {
@@ -138,10 +141,15 @@ impl QueryInner {
 
 impl Drop for QueryInner {
     fn drop(&mut self) {
-        self.primitives.send_response_final(&mut ResponseFinal {
-            rid: self.qid,
-            ext_qos: self.qos.into(),
-            ext_tstamp: None,
+        let primitives = self.primitives.clone();
+        let qid = self.qid;
+        let qos = self.qos;
+        tokio::spawn(async move {
+            primitives.send_response_final(ResponseFinal {
+                rid: qid,
+                ext_qos: qos.into(),
+                ext_tstamp: None,
+            }).await;
         });
     }
 }
@@ -567,37 +575,44 @@ impl Query {
         let ext_sinfo = None;
         #[cfg(feature = "unstable")]
         let ext_sinfo = sample.source_info.map(Into::into);
-        self.inner.primitives.send_response(&mut Response {
-            rid: self.inner.qid,
-            wire_expr: self.inner.primitives.keyexpr_to_wire(&sample.key_expr),
-            payload: ResponseBody::Reply(zenoh::Reply {
-                consolidation: zenoh::ConsolidationMode::DEFAULT,
-                ext_unknown: vec![],
-                payload: match sample.kind {
-                    SampleKind::Put => ReplyBody::Put(Put {
-                        timestamp: sample.timestamp,
-                        encoding: sample.encoding.into(),
-                        ext_sinfo,
-                        #[cfg(feature = "shared-memory")]
-                        ext_shm: None,
-                        ext_attachment: sample.attachment.map(|a| a.into()),
-                        ext_unknown: vec![],
-                        payload: sample.payload.into(),
-                    }),
-                    SampleKind::Delete => ReplyBody::Del(Del {
-                        timestamp: sample.timestamp,
-                        ext_sinfo,
-                        ext_attachment: sample.attachment.map(|a| a.into()),
-                        ext_unknown: vec![],
-                    }),
-                },
-            }),
-            ext_qos: sample.qos.into(),
-            ext_tstamp: None,
-            ext_respid: Some(response::ext::ResponderIdType {
-                zid: self.inner.zid,
-                eid: self.eid,
-            }),
+        let primitives = self.inner.primitives.clone();
+        let qid = self.inner.qid;
+        let wire_expr = self.inner.primitives.keyexpr_to_wire(&sample.key_expr);
+        let zid = self.inner.zid;
+        let eid = self.eid;
+        tokio::spawn(async move {
+            primitives.send_response(Response {
+                rid: qid,
+                wire_expr,
+                payload: ResponseBody::Reply(zenoh::Reply {
+                    consolidation: zenoh::ConsolidationMode::DEFAULT,
+                    ext_unknown: vec![],
+                    payload: match sample.kind {
+                        SampleKind::Put => ReplyBody::Put(Put {
+                            timestamp: sample.timestamp,
+                            encoding: sample.encoding.into(),
+                            ext_sinfo,
+                            #[cfg(feature = "shared-memory")]
+                            ext_shm: None,
+                            ext_attachment: sample.attachment.map(|a| a.into()),
+                            ext_unknown: vec![],
+                            payload: sample.payload.into(),
+                        }),
+                        SampleKind::Delete => ReplyBody::Del(Del {
+                            timestamp: sample.timestamp,
+                            ext_sinfo,
+                            ext_attachment: sample.attachment.map(|a| a.into()),
+                            ext_unknown: vec![],
+                        }),
+                    },
+                }),
+                ext_qos: sample.qos.into(),
+                ext_tstamp: None,
+                ext_respid: Some(response::ext::ResponderIdType {
+                    zid,
+                    eid,
+                }),
+            }).await;
         });
         Ok(())
     }

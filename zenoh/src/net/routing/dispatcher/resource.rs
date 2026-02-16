@@ -701,19 +701,24 @@ impl Resource {
                     get_mut_unchecked(face)
                         .local_mappings
                         .insert(expr_id, nonwild_prefix.clone());
-                    face.primitives.send_declare(RoutingContext::with_expr(
-                        &mut Declare {
-                            interest_id: None,
-                            ext_qos: declare::ext::QoSType::DECLARE,
-                            ext_tstamp: None,
-                            ext_nodeid: declare::ext::NodeIdType::DEFAULT,
-                            body: DeclareBody::DeclareKeyExpr(DeclareKeyExpr {
-                                id: expr_id,
-                                wire_expr: nonwild_prefix.expr().to_string().into(),
-                            }),
-                        },
-                        nonwild_prefix.expr().to_string(),
-                    ));
+                    let primitives = face.primitives.clone();
+                    let expr_str = nonwild_prefix.expr().to_string();
+                    tokio::spawn(async move {
+                        let ctx = RoutingContext::with_expr(
+                            Declare {
+                                interest_id: None,
+                                ext_qos: ext::QoSType::DECLARE,
+                                ext_tstamp: None,
+                                ext_nodeid: ext::NodeIdType::DEFAULT,
+                                body: DeclareBody::DeclareKeyExpr(DeclareKeyExpr {
+                                    id: expr_id,
+                                    wire_expr: expr_str.clone().into(),
+                                }),
+                            },
+                            expr_str,
+                        );
+                        primitives.send_declare(ctx.msg).await;
+                    });
                     face.update_interceptors_caches(&mut nonwild_prefix);
                     WireExpr {
                         scope: expr_id,
@@ -939,13 +944,13 @@ impl Resource {
     }
 }
 
-pub(crate) fn register_expr(
+pub(crate) async fn register_expr<'a>(
     tables: &TablesLock,
     face: &mut Arc<FaceState>,
     expr_id: ExprId,
-    expr: &WireExpr,
+    expr: &'a WireExpr<'a>,
 ) {
-    let rtables = zread!(tables.tables);
+    let rtables = zasyncread!(tables.tables);
     match rtables
         .data
         .get_mapping(face, &expr.scope, expr.mapping)
@@ -965,28 +970,29 @@ pub(crate) fn register_expr(
             }
             None => {
                 let res = Resource::get_resource(&prefix, &expr.suffix);
-                let (mut res, mut wtables) = if res
-                    .as_ref()
-                    .map(|r| r.ctx.is_some())
-                    .unwrap_or(false)
-                {
-                    drop(rtables);
-                    let wtables = zwrite!(tables.tables);
-                    (res.unwrap(), wtables)
-                } else {
-                    let mut fullexpr = prefix.expr().to_string();
-                    fullexpr.push_str(expr.suffix.as_ref());
-                    let mut matches = keyexpr::new(fullexpr.as_str())
-                        .map(|ke| Resource::get_matches(&rtables.data, ke))
-                        .unwrap_or_default();
-                    drop(rtables);
-                    let mut wtables = zwrite!(tables.tables);
-                    let mut res =
-                        Resource::make_resource(&mut wtables, &mut prefix, expr.suffix.as_ref());
-                    matches.push(Arc::downgrade(&res));
-                    Resource::match_resource(&wtables.data, &mut res, matches);
-                    (res, wtables)
-                };
+                let (mut res, mut wtables) =
+                    if res.as_ref().map(|r| r.context.is_some()).unwrap_or(false) {
+                        drop(rtables);
+                        let wtables = zasyncwrite!(tables.tables);
+                        (res.unwrap(), wtables)
+                    } else {
+                        let mut fullexpr = prefix.expr().to_string();
+                        fullexpr.push_str(expr.suffix.as_ref());
+                        let mut matches = keyexpr::new(fullexpr.as_str())
+                            .map(|ke| Resource::get_matches(&rtables, ke))
+                            .unwrap_or_default();
+                        drop(rtables);
+                        let mut wtables = zasyncwrite!(tables.tables);
+                        let mut res = Resource::make_resource(
+                            tables.hat_code.as_ref(),
+                            &mut wtables,
+                            &mut prefix,
+                            expr.suffix.as_ref(),
+                        );
+                        matches.push(Arc::downgrade(&res));
+                        Resource::match_resource(&wtables, &mut res, matches);
+                        (res, wtables)
+                    };
                 let ctx = get_mut_unchecked(&mut res)
                     .face_ctxs
                     .entry(face.id)
@@ -1017,13 +1023,8 @@ pub(crate) fn register_expr(
     }
 }
 
-pub(crate) fn unregister_expr(tables: &TablesLock, face: &mut Arc<FaceState>, expr_id: ExprId) {
-    let mut wtables = zwrite!(tables.tables);
-
-    let tables = &mut *wtables;
-    let hats = &mut tables.hats;
-    let region = face.region;
-
+pub(crate) async fn unregister_expr(tables: &TablesLock, face: &mut Arc<FaceState>, expr_id: ExprId) {
+    let mut wtables = zasyncwrite!(tables.tables);
     match get_mut_unchecked(face).remote_mappings.remove(&expr_id) {
         Some(mut res) => {
             if let Some(ctx) = get_mut_unchecked(&mut res).face_ctxs.get_mut(&face.id) {
@@ -1040,14 +1041,14 @@ pub(crate) fn unregister_expr(tables: &TablesLock, face: &mut Arc<FaceState>, ex
     drop(wtables);
 }
 
-pub(crate) fn register_expr_interest(
+pub(crate) async fn register_expr_interest<'a>(
     tables: &TablesLock,
     face: &mut Arc<FaceState>,
     id: InterestId,
-    expr: Option<&WireExpr>,
+    expr: Option<&'a WireExpr<'a>>,
 ) {
     if let Some(expr) = expr {
-        let rtables = zread!(tables.tables);
+        let rtables = zasyncread!(tables.tables);
         match rtables
             .data
             .get_mapping(face, &expr.scope, expr.mapping)
@@ -1057,7 +1058,7 @@ pub(crate) fn register_expr_interest(
                 let res = Resource::get_resource(&prefix, &expr.suffix);
                 let (res, wtables) = if res.as_ref().map(|r| r.ctx.is_some()).unwrap_or(false) {
                     drop(rtables);
-                    let wtables = zwrite!(tables.tables);
+                    let wtables = zasyncwrite!(tables.tables);
                     (res.unwrap(), wtables)
                 } else {
                     let mut fullexpr = prefix.expr().to_string();
@@ -1066,9 +1067,13 @@ pub(crate) fn register_expr_interest(
                         .map(|ke| Resource::get_matches(&rtables.data, ke))
                         .unwrap_or_default();
                     drop(rtables);
-                    let mut wtables = zwrite!(tables.tables);
-                    let mut res =
-                        Resource::make_resource(&mut wtables, &mut prefix, expr.suffix.as_ref());
+                    let mut wtables = zasyncwrite!(tables.tables);
+                    let mut res = Resource::make_resource(
+                        tables.hat_code.as_ref(),
+                        &mut wtables,
+                        &mut prefix,
+                        expr.suffix.as_ref(),
+                    );
                     matches.push(Arc::downgrade(&res));
                     Resource::match_resource(&wtables.data, &mut res, matches);
                     (res, wtables)
@@ -1085,10 +1090,20 @@ pub(crate) fn register_expr_interest(
             ),
         }
     } else {
-        let wtables = zwrite!(tables.tables);
+        let wtables = zasyncwrite!(tables.tables);
         get_mut_unchecked(face)
             .remote_key_interests
             .insert(id, None);
         drop(wtables);
     }
+}
+
+pub(crate) async fn unregister_expr_interest(
+    tables: &TablesLock,
+    face: &mut Arc<FaceState>,
+    id: InterestId,
+) {
+    let wtables = zasyncwrite!(tables.tables);
+    get_mut_unchecked(face).remote_key_interests.remove(&id);
+    drop(wtables);
 }
