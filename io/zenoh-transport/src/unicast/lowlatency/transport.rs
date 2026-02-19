@@ -14,14 +14,16 @@
 #[cfg(feature = "stats")]
 use std::sync::OnceLock;
 use std::{
-    sync::{Arc, RwLock as SyncRwLock},
+    sync::Arc,
     time::Duration,
 };
+
+use arc_swap::ArcSwapOption;
 
 use async_trait::async_trait;
 use async_lock::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard, RwLock};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
-use zenoh_core::{zasynclock, zasyncread, zasyncwrite, zread, zwrite};
+use zenoh_core::{zasynclock, zasyncread, zasyncwrite};
 use zenoh_link::Link;
 use zenoh_protocol::{
     core::{Bound, RegionName, WhatAmI, ZenohIdProto},
@@ -55,8 +57,8 @@ pub(crate) struct TransportUnicastLowlatency {
     pub(super) config: TransportConfigUnicast,
     // The link associated to the transport
     pub(super) link: Arc<RwLock<Option<TransportLinkUnicast>>>,
-    // The callback
-    pub(super) callback: Arc<SyncRwLock<Option<Arc<dyn TransportPeerEventHandler>>>>,
+    // The callback — ArcSwapOption gives lock-free reads on the hot receive path
+    pub(super) callback: Arc<ArcSwapOption<Arc<dyn TransportPeerEventHandler>>>,
     // Mutex for notification
     status: Arc<AsyncMutex<TransportStatus>>,
     // Transport statistics
@@ -84,7 +86,7 @@ impl TransportUnicastLowlatency {
             manager,
             config,
             link: Arc::new(RwLock::new(None)),
-            callback: Arc::new(SyncRwLock::new(None)),
+            callback: Arc::new(ArcSwapOption::from(None::<Arc<Arc<dyn TransportPeerEventHandler>>>)),
             status: Arc::new(AsyncMutex::new(TransportStatus::Uninitialized)),
             #[cfg(feature = "stats")]
             stats,
@@ -139,7 +141,7 @@ impl TransportUnicastLowlatency {
         if let Some(val) = zasyncwrite!(self.link).as_ref() {
             let _ = val.close(Some(close::reason::GENERIC)).await;
         }
-        let callback = zwrite!(self.callback).take();
+        let callback = self.callback.swap(None);
         // Notify the callback that we have closed the transport
         if let Some(cb) = callback.as_ref() {
             cb.closed();
@@ -179,7 +181,7 @@ impl TransportUnicastTrait for TransportUnicastLowlatency {
     /*            ACCESSORS              */
     /*************************************/
     fn set_callback(&self, callback: Arc<dyn TransportPeerEventHandler>) {
-        *zwrite!(self.callback) = Some(callback);
+        self.callback.store(Some(Arc::new(callback)));
     }
 
     async fn get_status(&self) -> AsyncMutexGuard<'_, TransportStatus> {
@@ -234,7 +236,7 @@ impl TransportUnicastTrait for TransportUnicastLowlatency {
     }
 
     fn get_callback(&self) -> Option<Arc<dyn TransportPeerEventHandler>> {
-        zread!(self.callback).clone()
+        self.callback.load_full().map(|outer| (*outer).clone())
     }
 
     fn get_config(&self) -> &TransportConfigUnicast {

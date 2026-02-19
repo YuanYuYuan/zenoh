@@ -16,7 +16,6 @@ use zenoh_buffers::{
     ZSlice,
 };
 use zenoh_codec::{RCodec, Zenoh080};
-use zenoh_core::zread;
 use zenoh_link::LinkUnicast;
 use zenoh_protocol::{network::NetworkMessageMut, transport::TransportMessageLowLatency};
 use zenoh_result::{zerror, ZResult};
@@ -33,7 +32,7 @@ impl TransportUnicastLowlatency {
         mut msg: NetworkMessageMut,
         #[cfg(feature = "stats")] stats: &zenoh_stats::LinkStats,
     ) -> ZResult<()> {
-        let callback = zread!(self.callback).clone();
+        let callback = self.callback.load_full();
         if let Some(callback) = callback.as_ref() {
             #[cfg(feature = "stats")]
             stats.inc_network_message(

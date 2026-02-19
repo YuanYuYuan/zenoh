@@ -108,7 +108,8 @@ impl TransportUnicastUniversal {
             // Drop invalid message and continue
             return Ok(());
         }
-        if let Some(callback) = self.callback.get() {
+        let callback = self.callback.load_full();
+        if let Some(callback) = callback.as_deref() {
             for mut msg in frame {
                 self.trigger_callback(
                     callback.as_ref(),
@@ -189,7 +190,8 @@ impl TransportUnicastUniversal {
         if !more {
             // When shared-memory feature is disabled, msg does not need to be mutable
             if let Some(mut msg) = guard.defrag.defragment() {
-                if let Some(callback) = self.callback.get() {
+                let callback = self.callback.load_full();
+                if let Some(callback) = callback.as_deref() {
                     return self.trigger_callback(
                         callback.as_ref(),
                         msg.as_mut(),

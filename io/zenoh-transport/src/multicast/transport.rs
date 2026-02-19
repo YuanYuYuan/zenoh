@@ -21,6 +21,7 @@ use std::{
     time::Duration,
 };
 
+use arc_swap::ArcSwapOption;
 use tokio_util::sync::CancellationToken;
 use zenoh_core::{zcondfeat, zread, zwrite};
 use zenoh_link::{Link, Locator};
@@ -87,8 +88,8 @@ pub(crate) struct TransportMulticastInner {
     pub(super) locator: Locator,
     // The multicast link
     pub(super) link: Arc<RwLock<Option<TransportLinkMulticastUniversal>>>,
-    // The callback
-    pub(super) callback: Arc<RwLock<Option<Arc<dyn TransportMulticastEventHandler>>>>,
+    // The callback — ArcSwapOption gives lock-free reads on the hot receive path
+    pub(super) callback: Arc<ArcSwapOption<Arc<dyn TransportMulticastEventHandler>>>,
     // Task controller for safe task cancellation
     task_controller: TaskController,
     // Transport statistics
@@ -132,7 +133,7 @@ impl TransportMulticastInner {
             peers: Arc::new(RwLock::new(HashMap::new())),
             locator: config.link.link.get_dst().to_owned(),
             link: Arc::new(RwLock::new(None)),
-            callback: Arc::new(RwLock::new(None)),
+            callback: Arc::new(ArcSwapOption::from(None::<Arc<Arc<dyn TransportMulticastEventHandler>>>)),
             task_controller: TaskController::default(),
             #[cfg(feature = "stats")]
             stats,
@@ -151,8 +152,7 @@ impl TransportMulticastInner {
     }
 
     pub(super) fn set_callback(&self, callback: Arc<dyn TransportMulticastEventHandler>) {
-        let mut guard = zwrite!(self.callback);
-        *guard = Some(callback);
+        self.callback.store(Some(Arc::new(callback)));
     }
 
     /*************************************/
@@ -172,7 +172,7 @@ impl TransportMulticastInner {
     }
 
     pub(crate) fn get_callback(&self) -> Option<Arc<dyn TransportMulticastEventHandler>> {
-        zread!(self.callback).clone()
+        self.callback.load_full().map(|outer| (*outer).clone())
     }
 
     pub(crate) fn get_link(&self) -> TransportLinkMulticast {
@@ -185,7 +185,7 @@ impl TransportMulticastInner {
     pub(super) async fn delete(&self) -> ZResult<()> {
         tracing::debug!("Closing multicast transport on {:?}", self.locator);
 
-        let callback = zwrite!(self.callback).take();
+        let callback = self.callback.swap(None);
 
         // Delete the transport on the manager
         let _ = self.manager.del_transport_multicast(&self.locator).await;
@@ -348,7 +348,7 @@ impl TransportMulticastInner {
             region_name: None, // TODO(regions): region names are unsupported for multicast transports
         };
 
-        let handler = match zread!(self.callback).as_ref() {
+        let handler = match self.callback.load_full() {
             Some(cb) => cb.new_peer(peer.clone())?,
             None => return Ok(()),
         };

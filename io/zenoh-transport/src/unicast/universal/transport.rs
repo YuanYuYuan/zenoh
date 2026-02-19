@@ -14,13 +14,11 @@
 use std::{
     fmt::DebugStruct,
     ops::{Deref, Not},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, OnceLock, RwLock,
-    },
+    sync::{Arc, RwLock},
     time::Duration,
 };
 
+use arc_swap::ArcSwapOption;
 use async_trait::async_trait;
 use async_lock::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard};
 use zenoh_core::{zasynclock, zcondfeat, zread, zwrite};
@@ -46,35 +44,6 @@ use crate::{
     TransportManager, TransportPeerEventHandler,
 };
 
-pub(crate) struct ClosableCallback {
-    callback: OnceLock<Arc<dyn TransportPeerEventHandler>>,
-    closed: AtomicBool,
-}
-
-impl ClosableCallback {
-    pub(crate) fn new() -> Self {
-        ClosableCallback {
-            callback: OnceLock::new(),
-            closed: AtomicBool::new(false),
-        }
-    }
-
-    pub(crate) fn set(&self, cb: Arc<dyn TransportPeerEventHandler>) {
-        let _ = self.callback.set(cb);
-    }
-
-    pub(crate) fn get(&self) -> Option<&Arc<dyn TransportPeerEventHandler>> {
-        self.callback
-            .get()
-            .filter(|_| !self.closed.load(Ordering::Relaxed))
-    }
-
-    pub(crate) fn close(&self) -> Option<&Arc<dyn TransportPeerEventHandler>> {
-        self.closed.store(true, Ordering::Relaxed);
-        self.callback.get()
-    }
-}
-
 /*************************************/
 /*        UNIVERSAL TRANSPORT        */
 /*************************************/
@@ -92,8 +61,8 @@ pub(crate) struct TransportUnicastUniversal {
     pub(super) shm_context: Option<UnicastTransportShmContext>,
     // The links associated to the channel
     pub(super) links: Arc<RwLock<TransportLinks>>,
-    // The callback
-    pub(super) callback: Arc<ClosableCallback>,
+    // The callback — ArcSwapOption gives lock-free reads on the hot receive path
+    pub(super) callback: Arc<ArcSwapOption<Arc<dyn TransportPeerEventHandler>>>,
     // Mutex for notification
     pub(super) status: Arc<AsyncMutex<TransportStatus>>,
     // Transport statistics
@@ -137,7 +106,7 @@ impl TransportUnicastUniversal {
             priority_tx: priority_tx.into_boxed_slice().into(),
             priority_rx: priority_rx.into_boxed_slice().into(),
             links: Arc::new(RwLock::new(TransportLinks::default())),
-            callback: Arc::new(ClosableCallback::new()),
+            callback: Arc::new(ArcSwapOption::from(None::<Arc<Arc<dyn TransportPeerEventHandler>>>)),
             status: Arc::new(AsyncMutex::new(TransportStatus::Uninitialized)),
             #[cfg(feature = "stats")]
             stats,
@@ -162,7 +131,7 @@ impl TransportUnicastUniversal {
         // to avoid concurrent new_transport and closing/closed notifications
         let mut status_guard = self.get_status().await;
         *status_guard = TransportStatus::Closed;
-        let callback = self.callback.close();
+        let callback = self.callback.swap(None);
 
         // Close all the links
         let mut links = zwrite!(self.links).take();
@@ -193,19 +162,9 @@ impl TransportUnicastUniversal {
         };
 
         // Notify the callback
-        if let Some(callback) = self.callback.get().cloned() {
-            let associated_link = associated_link.clone();
-            tokio::task::spawn_blocking(move || {
-                callback.del_link(link);
-                if let Some(asl) = &associated_link {
-                    callback.del_link(Link::new_unicast(
-                        &asl.link.link,
-                        asl.link.config.priorities.clone(),
-                        asl.link.config.reliability,
-                    ));
-                }
-            })
-            .await?;
+        let cb = self.callback.load_full();
+        if let Some(callback) = cb {
+            callback.del_link(link);
         }
 
         // Associated link must also be closed. run both close calls, return whichever failed first
@@ -350,7 +309,7 @@ impl TransportUnicastTrait for TransportUnicastUniversal {
     /*            ACCESSORS              */
     /*************************************/
     fn set_callback(&self, callback: Arc<dyn TransportPeerEventHandler>) {
-        self.callback.set(callback)
+        self.callback.store(Some(Arc::new(callback)));
     }
 
     async fn get_status(&self) -> AsyncMutexGuard<'_, TransportStatus> {
@@ -383,7 +342,7 @@ impl TransportUnicastTrait for TransportUnicastUniversal {
     }
 
     fn get_callback(&self) -> Option<Arc<dyn TransportPeerEventHandler>> {
-        self.callback.get().cloned()
+        self.callback.load_full().map(|outer| (*outer).clone())
     }
 
     fn get_config(&self) -> &TransportConfigUnicast {

@@ -53,6 +53,7 @@ transport_ws = ["zenoh-link/transport_ws"]
 unstable = ["zenoh-config/unstable", "zenoh-protocol/unstable"]
 
 [dependencies]
+arc-swap = { workspace = true }
 async-channel = { workspace = true }
 async-io = { workspace = true }
 async-lock = { workspace = true }
