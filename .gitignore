@@ -30,7 +30,14 @@ ci/valgrind-check/*.log
 # Code coverage reports
 *.profraw
 
+
 # cargo-fuzz-related
 **/fuzz/artifacts
 **/fuzz/corpus
 **/fuzz/coverage
+_*
+.claude
+.direnv
+.venv-mcp
+.mcp.json
+.envrc
