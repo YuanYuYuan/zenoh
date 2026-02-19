@@ -21,14 +21,15 @@
 use std::{
     collections::HashSet,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Mutex,
     },
+    time::Instant,
 };
 
+use lazy_static::lazy_static;
 use nonempty_collections::NEVec;
 use zenoh_config::{DownsamplingItemConf, DownsamplingMessage, DownsamplingRuleConf};
-use zenoh_core::zlock;
 use zenoh_keyexpr::keyexpr_tree::{
     impls::KeyedSetProvider, support::UnknownWildness, IKeyExprTree, IKeyExprTreeMut, KeBoxTree,
 };
@@ -203,15 +204,20 @@ impl DownsamplingFilters {
     }
 }
 
-struct TimeState {
-    pub threshold: std::time::Duration,
-    pub latest_message_timestamp: Mutex<std::time::Instant>,
+lazy_static! {
+    // Reference point for lock-free timestamp arithmetic (nanos since this Instant).
+    static ref DS_EPOCH: Instant = Instant::now();
 }
 
 pub(crate) struct DownsamplingInterceptor {
     filters: DownsamplingFilters,
     ke_id: KeBoxTree<usize, UnknownWildness, KeyedSetProvider>,
-    ke_state: Vec<TimeState>,
+    // Per-rule threshold in nanoseconds (u64::MAX = block all, indexed by rule ID).
+    thresholds: Box<[u64]>,
+    // Per-rule last-passed timestamp in nanos since DS_EPOCH (indexed by rule ID).
+    // Accessed with Relaxed ordering — slight over-passing under contention is acceptable
+    // for a rate-limiter.
+    last_timestamps: Box<[AtomicU64]>,
     flow: InterceptorFlow,
     #[cfg(feature = "stats")]
     stats: zenoh_stats::DropStats,
@@ -243,17 +249,16 @@ impl InterceptorTrait for DownsamplingInterceptor {
             return true;
         };
 
-        let Some(state) = self.ke_state.get(id) else {
-            tracing::debug!("unexpected cache ID {id}");
+        let Some(threshold) = self.thresholds.get(id).copied() else {
+            tracing::debug!("unexpected cache ID {}", id);
             return true;
         };
-        let mut latest_message_timestamp = zlock!(state.latest_message_timestamp);
-        let timestamp = std::time::Instant::now();
-        if timestamp - *latest_message_timestamp >= state.threshold {
-            *latest_message_timestamp = timestamp;
+        let now_nanos = DS_EPOCH.elapsed().as_nanos() as u64;
+        let last_nanos = self.last_timestamps[id].load(Ordering::Relaxed);
+        if now_nanos.saturating_sub(last_nanos) >= threshold {
+            self.last_timestamps[id].store(now_nanos, Ordering::Relaxed);
             true
         } else {
-            drop(latest_message_timestamp);
             if !INFO_FLAG.swap(true, Ordering::Relaxed) {
                 tracing::info!("Some message(s) have been dropped by the downsampling interceptor. Enable trace level tracing for more details.");
             }
@@ -283,30 +288,38 @@ impl DownsamplingInterceptor {
         flow: InterceptorFlow,
         #[cfg(feature = "stats")] stats: zenoh_stats::DropStats,
     ) -> Self {
+        // Ensure DS_EPOCH is initialized now (at interceptor creation time).
+        let _ = *DS_EPOCH;
+
         let mut ke_id = KeBoxTree::default();
-        let mut ke_state = Vec::new();
+        let mut thresholds = Vec::with_capacity(rules.len().get());
+        let mut last_timestamps = Vec::with_capacity(rules.len().get());
+
         for (id, rule) in rules.into_iter().enumerate() {
-            let mut threshold = std::time::Duration::MAX;
-            let mut latest_message_timestamp = std::time::Instant::now();
-            if rule.freq != 0.0 {
-                threshold =
-                    std::time::Duration::from_nanos((1. / rule.freq * NANOS_PER_SEC) as u64);
-                latest_message_timestamp -= threshold;
-            }
+            let threshold_nanos = if rule.freq != 0.0 {
+                (1. / rule.freq * NANOS_PER_SEC) as u64
+            } else {
+                // freq == 0 means block all messages; u64::MAX is never reached by elapsed nanos
+                // over any realistic program lifetime (would require ~584 years of runtime).
+                u64::MAX
+            };
             ke_id.insert(&rule.key_expr, id);
-            ke_state.push(TimeState {
-                threshold,
-                latest_message_timestamp: latest_message_timestamp.into(),
-            });
+            // Initialize to 0 so the first message passes once DS_EPOCH.elapsed() >= threshold.
+            // For typical thresholds (>= 1ms) this holds within normal session setup time.
+            thresholds.push(threshold_nanos);
+            last_timestamps.push(AtomicU64::new(0));
             tracing::debug!(
-                "New downsampler rule enabled: key_expr={key_expr:?}, threshold={threshold:?}, messages={filters:?}",
-                key_expr = rule.key_expr,
+                "New downsampler rule enabled: key_expr={:?}, threshold_nanos={:?}, messages={:?}",
+                rule.key_expr,
+                threshold_nanos,
+                filters,
             );
         }
         Self {
             filters,
             ke_id,
-            ke_state,
+            thresholds: thresholds.into_boxed_slice(),
+            last_timestamps: last_timestamps.into_boxed_slice(),
             flow,
             #[cfg(feature = "stats")]
             stats,

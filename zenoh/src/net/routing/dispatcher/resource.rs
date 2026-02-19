@@ -19,8 +19,10 @@ use std::{
     fmt::Debug,
     hash::{Hash, Hasher},
     ops::{Deref, DerefMut},
-    sync::{Arc, RwLock, Weak},
+    sync::{Arc, Weak},
 };
+
+use arc_swap::ArcSwap;
 
 use zenoh_collections::{IntHashMap, IntHashSet, SingleOrBoxHashSet};
 use zenoh_protocol::{
@@ -231,6 +233,7 @@ pub type RoutesVersion = u64;
 ///
 /// 2. Routes depend on the source node id for router hats. In a `R1 - R - R2` topology, R would
 ///    route a message to R1 only if it originates in R2 and vice-versa.
+#[derive(Clone)]
 pub(crate) struct Routes<T> {
     /// Mapping from **source** [`Region`] and [`NodeId`] to data/query routes.
     mapping: RegionMap<NodeIdMap<T>>,
@@ -299,23 +302,31 @@ impl<T> Routes<T> {
 }
 
 pub(crate) fn get_or_set_route<T: Clone>(
-    routes: &RwLock<Routes<T>>,
+    routes: &ArcSwap<Routes<T>>,
     version: RoutesVersion,
     region: &Region,
     node_id: NodeId,
     compute_route: impl FnOnce() -> T,
 ) -> T {
-    if let Some(route) = routes.read().unwrap().get_route(version, region, node_id) {
-        return route.clone();
+    // Fast path: lock-free load of the cached route snapshot.
+    {
+        let snapshot = routes.load();
+        if let Some(route) = snapshot.get_route(version, region, node_id) {
+            return route.clone();
+        }
     }
-    let mut routes = routes.write().unwrap();
-    // NOTE(regions): we supposedly re-read the routes here because they might've changed, but I'm
-    // not sure this is true given that all callers would've acquired `TablesLock::tables`.
-    if let Some(route) = routes.get_route(version, region, node_id) {
-        return route.clone();
-    }
+    // Slow path: compute the route and insert it into the cache via read-copy-update.
+    // rcu() loops on CAS failure, so the closure must be Fn (not FnOnce).
     let route = compute_route();
-    routes.set_route(version, region, node_id, route.clone());
+    let route_to_insert = route.clone();
+    routes.rcu(|current| {
+        let mut new_routes = (**current).clone();
+        // Another thread may have inserted this route while we were computing.
+        if new_routes.get_route(version, region, node_id).is_none() {
+            new_routes.set_route(version, region, node_id, route_to_insert.clone());
+        }
+        Arc::new(new_routes)
+    });
     route
 }
 
@@ -325,7 +336,8 @@ pub(crate) type QueryRoutes = Routes<Arc<QueryTargetQablSet>>;
 pub(crate) struct ResourceContext {
     pub(crate) matches: Vec<Weak<Resource>>,
     pub(crate) hats: RegionMap<HatResourceContext>,
-    pub(crate) data_routes: RwLock<DataRoutes>,
+    pub(crate) data_routes: ArcSwap<DataRoutes>,
+    pub(crate) query_routes: ArcSwap<QueryRoutes>,
     #[cfg(feature = "stats")]
     pub(crate) stats_keys: zenoh_stats::StatsKeyCache,
 }
@@ -335,39 +347,40 @@ impl ResourceContext {
         ResourceContext {
             matches: Vec::new(),
             hats: hat,
-            data_routes: Default::default(),
+            data_routes: ArcSwap::from_pointee(DataRoutes::default()),
+            query_routes: ArcSwap::from_pointee(QueryRoutes::default()),
             #[cfg(feature = "stats")]
             stats_keys: Default::default(),
         }
     }
 
     pub(crate) fn disable_data_routes(&mut self) {
-        self.data_routes.get_mut().unwrap().clear();
+        self.data_routes.store(Arc::new(DataRoutes::default()));
     }
 }
 
 pub(crate) struct HatResourceContext {
     /// Map from `Region` to `HatContext`.
     pub(crate) ctx: Box<dyn Any + Send + Sync>,
-    pub(crate) data_routes: RwLock<DataRoutes>,
-    pub(crate) query_routes: RwLock<QueryRoutes>,
+    pub(crate) data_routes: ArcSwap<DataRoutes>,
+    pub(crate) query_routes: ArcSwap<QueryRoutes>,
 }
 
 impl HatResourceContext {
     pub(crate) fn new(ctx: Box<dyn Any + Send + Sync>) -> Self {
         HatResourceContext {
             ctx,
-            data_routes: Default::default(),
-            query_routes: Default::default(),
+            data_routes: ArcSwap::from_pointee(DataRoutes::default()),
+            query_routes: ArcSwap::from_pointee(QueryRoutes::default()),
         }
     }
 
     pub(crate) fn disable_data_routes(&mut self) {
-        self.data_routes.get_mut().unwrap().clear();
+        self.data_routes.store(Arc::new(DataRoutes::default()));
     }
 
     pub(crate) fn disable_query_routes(&mut self) {
-        self.query_routes.get_mut().unwrap().clear();
+        self.query_routes.store(Arc::new(QueryRoutes::default()));
     }
 }
 
