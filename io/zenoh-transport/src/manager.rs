@@ -699,10 +699,13 @@ impl TransportManager {
         lsu
     }
 
-    // TODO(yuyuan): Can we make this async as above?
     pub fn get_locators(&self) -> Vec<Locator> {
-        let mut lsu = zenoh_runtime::ZRuntime::Net.block_in_place(self.get_locators_unicast());
-        let mut lsm = zenoh_runtime::ZRuntime::Net.block_in_place(self.get_locators_multicast());
+        let mut lsu = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.get_locators_unicast())
+        });
+        let mut lsm = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.get_locators_multicast())
+        });
         lsu.append(&mut lsm);
         lsu
     }

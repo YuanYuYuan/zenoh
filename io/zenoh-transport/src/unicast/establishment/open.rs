@@ -57,7 +57,6 @@ struct StateTransport {
     ext_mlink: ext::multilink::StateOpen,
     #[cfg(feature = "shared-memory")]
     ext_shm: ext::shm::StateOpen,
-    ext_lowlatency: ext::lowlatency::StateOpen,
     ext_patch: ext::patch::StateOpen,
     ext_region_name: ext::region_name::StateOpen,
 }
@@ -125,7 +124,6 @@ struct OpenLink<'a> {
     ext_shm: Option<ext::shm::ShmFsm<'a>>,
     #[cfg(feature = "transport_auth")]
     ext_auth: ext::auth::AuthFsm<'a>,
-    ext_lowlatency: ext::lowlatency::LowLatencyFsm<'a>,
     #[cfg(feature = "transport_compression")]
     ext_compression: ext::compression::CompressionFsm<'a>,
     ext_patch: ext::patch::PatchFsm<'a>,
@@ -183,13 +181,6 @@ impl<'a, 'b: 'a> OpenFsm for &'a mut OpenLink<'b> {
             None
         );
 
-        // Extension LowLatency
-        let ext_lowlatency = self
-            .ext_lowlatency
-            .send_init_syn(&state.transport.ext_lowlatency)
-            .await
-            .map_err(|e| (e, Some(close::reason::GENERIC)))?;
-
         // Extension Compression
         let ext_compression = zcondfeat!(
             "transport_compression",
@@ -226,7 +217,6 @@ impl<'a, 'b: 'a> OpenFsm for &'a mut OpenLink<'b> {
             ext_shm,
             ext_auth,
             ext_mlink,
-            ext_lowlatency,
             ext_compression,
             ext_patch,
             ext_region_name,
@@ -358,12 +348,6 @@ impl<'a, 'b: 'a> OpenFsm for &'a mut OpenLink<'b> {
             .await
             .map_err(|e| (e, Some(close::reason::GENERIC)))?;
 
-        // Extension LowLatency
-        self.ext_lowlatency
-            .recv_init_ack((&mut state.transport.ext_lowlatency, init_ack.ext_lowlatency))
-            .await
-            .map_err(|e| (e, Some(close::reason::GENERIC)))?;
-
         // Extension Compression
         #[cfg(feature = "transport_compression")]
         self.ext_compression
@@ -441,13 +425,6 @@ impl<'a, 'b: 'a> OpenFsm for &'a mut OpenLink<'b> {
             None
         );
 
-        // Extension LowLatency
-        let ext_lowlatency = self
-            .ext_lowlatency
-            .send_open_syn(&state.transport.ext_lowlatency)
-            .await
-            .map_err(|e| (e, Some(close::reason::GENERIC)))?;
-
         // Extension Compression
         let ext_compression = zcondfeat!(
             "transport_compression",
@@ -500,7 +477,6 @@ impl<'a, 'b: 'a> OpenFsm for &'a mut OpenLink<'b> {
             ext_shm,
             ext_auth,
             ext_mlink,
-            ext_lowlatency,
             ext_compression,
             ext_remote_bound,
         }
@@ -589,12 +565,6 @@ impl<'a, 'b: 'a> OpenFsm for &'a mut OpenLink<'b> {
             .await
             .map_err(|e| (e, Some(close::reason::GENERIC)))?;
 
-        // Extension LowLatency
-        self.ext_lowlatency
-            .recv_open_ack((&mut state.transport.ext_lowlatency, open_ack.ext_lowlatency))
-            .await
-            .map_err(|e| (e, Some(close::reason::GENERIC)))?;
-
         // Extension Compression
         #[cfg(feature = "transport_compression")]
         self.ext_compression
@@ -648,7 +618,6 @@ pub(crate) async fn open_link(
             .map(|ctx| ext::shm::ShmFsm::new(&ctx.auth)),
         #[cfg(feature = "transport_auth")]
         ext_auth: manager.state.unicast.authenticator.fsm(&manager.prng),
-        ext_lowlatency: ext::lowlatency::LowLatencyFsm::new(),
         #[cfg(feature = "transport_compression")]
         ext_compression: ext::compression::CompressionFsm::new(),
         ext_patch: ext::patch::PatchFsm::new(),
@@ -682,9 +651,6 @@ pub(crate) async fn open_link(
                     .open(manager.config.unicast.max_links > 1),
                 #[cfg(feature = "shared-memory")]
                 ext_shm: ext::shm::StateOpen::new(),
-                ext_lowlatency: ext::lowlatency::StateOpen::new(
-                    manager.config.unicast.is_lowlatency,
-                ),
                 ext_patch: ext::patch::StateOpen::new(),
                 ext_region_name: ext::region_name::StateOpen::new(),
             },
@@ -757,7 +723,6 @@ pub(crate) async fn open_link(
             true => osyn_out.ext_shm.map(TransportShmConfig::new),
             false => None,
         },
-        is_lowlatency: state.transport.ext_lowlatency.is_lowlatency(),
         #[cfg(feature = "auth_usrpwd")]
         auth_id: UsrPwdId(None),
         patch: state.transport.ext_patch.get(),

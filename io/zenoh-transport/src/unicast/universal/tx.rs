@@ -83,7 +83,7 @@ impl TransportUnicastUniversal {
                 "Unable to push non droppable network message to {}. Closing transport!",
                 self.config.zid
             );
-            zenoh_runtime::ZRuntime::RX.spawn({
+            tokio::spawn({
                 let transport = self.clone();
                 async move {
                     if let Err(e) = transport.close(close::reason::UNRESPONSIVE).await {
@@ -178,7 +178,7 @@ impl TransportUnicastUniversal {
                     transport_link.block_first_notifiers[priority as usize].clone();
                 let msg = NetworkMessageExt::to_owned(&msg);
                 let pipeline_clone = pipeline.clone();
-                zenoh_runtime::ZRuntime::Net.spawn(async move {
+                tokio::spawn(async move {
                     let msg = msg.as_ref();
                     if let Ok(pushed) = pipeline_clone.push_network_message(msg).await {
                         transport.handle_push_result(

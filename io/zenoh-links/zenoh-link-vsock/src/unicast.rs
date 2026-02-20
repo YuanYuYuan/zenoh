@@ -299,7 +299,7 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastVsock {
                     res
                 }
             };
-            let handle = zenoh_runtime::ZRuntime::Acceptor.spawn(task);
+            let handle = tokio::spawn(task);
 
             let listener = ListenerUnicastVsock::new(endpoint, token, handle);
             // Update the list of active listeners on the manager

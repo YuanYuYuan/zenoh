@@ -109,7 +109,7 @@ impl ListenersUnicastIP {
             zwrite!(c_listeners).remove(&c_addr);
             res
         };
-        let handle = zenoh_runtime::ZRuntime::Acceptor.spawn(task);
+        let handle = tokio::spawn(task);
 
         let listener = ListenerUnicastIP::new(endpoint, token, handle);
         // Update the list of active listeners on the manager

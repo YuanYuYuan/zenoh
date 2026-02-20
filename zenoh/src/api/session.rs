@@ -932,7 +932,7 @@ impl Session {
     ///     .declare_subscriber("key/expression")
     ///     .await
     ///     .unwrap();
-    /// let subscriber_task = ZRuntime::Application.spawn(async move {
+    /// let subscriber_task = tokio::spawn(async move {
     ///     while let Ok(sample) = subscriber.recv_async().await {
     ///         println!("Received: {} {:?}", sample.key_expr(), sample.payload());
     ///     }
@@ -1538,7 +1538,7 @@ impl Session {
             if entry.count == 0 {
                 state.local_resources.remove(&expr_id);
                 drop(state);
-                ZRuntime::Application.spawn(async move {
+                tokio::spawn(async move {
                     primitives.send_declare(Declare {
                         interest_id: None,
                         ext_qos: declare::ext::QoSType::DECLARE,
@@ -1611,7 +1611,7 @@ impl Session {
             let primitives = state.primitives()?;
             let wire_expr = Some(res.to_wire(self).to_owned());
             drop(state);
-            ZRuntime::Application.spawn(async move {
+            tokio::spawn(async move {
                 primitives.send_interest(Interest {
                     id,
                     mode: InterestMode::CurrentFuture,
@@ -1641,7 +1641,7 @@ impl Session {
                 }) {
                     drop(state);
                     let remote_id = pub_state.remote_id;
-                    ZRuntime::Application.spawn(async move {
+                    tokio::spawn(async move {
                         primitives.send_interest(Interest {
                             id: remote_id,
                             mode: InterestMode::Final,
@@ -1675,7 +1675,7 @@ impl Session {
         if let Some(res) = declared_querier {
             let wire_expr = Some(res.to_wire(self).to_owned());
             drop(state);
-            ZRuntime::Application.spawn(async move {
+            tokio::spawn(async move {
                 primitives.send_interest(Interest {
                     id,
                     mode: InterestMode::CurrentFuture,
@@ -1710,7 +1710,7 @@ impl Session {
                 }) {
                     drop(state);
                     let remote_id = querier_state.remote_id;
-                    ZRuntime::Application.spawn(async move {
+                    tokio::spawn(async move {
                         primitives.send_interest(Interest {
                             id: remote_id,
                             mode: InterestMode::Final,
@@ -1761,7 +1761,7 @@ impl Session {
             drop(state);
             let wire_expr = key_expr.to_wire(self).to_owned();
 
-            ZRuntime::Application.spawn(async move {
+            tokio::spawn(async move {
                 primitives.send_declare(Declare {
                     interest_id: None,
                     ext_qos: declare::ext::QoSType::DECLARE,
@@ -1813,7 +1813,7 @@ impl Session {
                         }) {
                             drop(state);
                             let remote_id = sub_state.remote_id;
-                            ZRuntime::Application.spawn(async move {
+                            tokio::spawn(async move {
                                 primitives.send_declare(Declare {
                                     interest_id: None,
                                     ext_qos: declare::ext::QoSType::DECLARE,
@@ -1855,7 +1855,7 @@ impl Session {
                     drop(state);
 
                     let id = sub_state.id;
-                    ZRuntime::Application.spawn(async move {
+                    tokio::spawn(async move {
                         primitives.send_interest(Interest {
                             id,
                             mode: InterestMode::Final,
@@ -1910,7 +1910,7 @@ impl Session {
                 distance: 0,
             };
             let wire_expr = key_expr.to_wire(self).to_owned();
-            ZRuntime::Application.spawn(async move {
+            tokio::spawn(async move {
                 primitives.send_declare(Declare {
                     interest_id: None,
                     ext_qos: declare::ext::QoSType::DECLARE,
@@ -1948,7 +1948,7 @@ impl Session {
             if qable_state.origin != Locality::SessionLocal {
                 drop(state);
                 let id = qable_state.id;
-                ZRuntime::Application.spawn(async move {
+                tokio::spawn(async move {
                     primitives.send_declare(Declare {
                         interest_id: None,
                         ext_qos: declare::ext::QoSType::DECLARE,
@@ -1988,7 +1988,7 @@ impl Session {
         let id = self.0.runtime.next_id();
         let primitives = zread!(self.0.state).primitives()?;
         let wire_expr = key_expr.to_wire(self).to_owned();
-        ZRuntime::Application.spawn(async move {
+        tokio::spawn(async move {
             primitives.send_declare(Declare {
                 interest_id: None,
                 ext_qos: declare::ext::QoSType::DECLARE,
@@ -2095,7 +2095,7 @@ impl Session {
             InterestMode::Future
         };
         let wire_expr = Some(key_expr.to_wire(self).to_owned());
-        ZRuntime::Application.spawn(async move {
+        tokio::spawn(async move {
             primitives
                 .send_interest(Interest {
                     id,
@@ -2117,7 +2117,7 @@ impl Session {
             return Ok(());
         };
         trace!("undeclare_liveliness({:?})", tid);
-        ZRuntime::Application.spawn(async move {
+        tokio::spawn(async move {
             primitives
                 .send_declare(Declare {
                     interest_id: None,
@@ -2558,7 +2558,7 @@ impl Session {
             let rel = reliability;
             #[cfg(not(feature = "unstable"))]
             let rel = Reliability::DEFAULT;
-            ZRuntime::Application.spawn(async move {
+            tokio::spawn(async move {
                 primitives.send_push(push_msg, rel).await;
             });
         }
@@ -2756,7 +2756,7 @@ impl Session {
                 encoding: v.1.clone().into(),
                 payload: v.0.clone().into(),
             });
-            ZRuntime::Application.spawn(async move {
+            tokio::spawn(async move {
                 primitives
                     .send_request(Request {
                         id: qid,
@@ -2878,7 +2878,7 @@ impl Session {
         drop(state);
 
         let wire_expr = Some(wexpr.clone());
-        ZRuntime::Application.spawn(async move {
+        tokio::spawn(async move {
             primitives
                 .send_interest(Interest {
                     id,

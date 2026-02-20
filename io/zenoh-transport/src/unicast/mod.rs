@@ -14,7 +14,6 @@
 pub mod authentication;
 pub mod establishment;
 pub(crate) mod link;
-pub(crate) mod lowlatency;
 pub(crate) mod manager;
 #[cfg(feature = "test")]
 pub mod test_helpers;
@@ -62,7 +61,6 @@ pub(crate) struct TransportConfigUnicast {
     pub(crate) multilink: Option<ZPublicKey>,
     #[cfg(feature = "shared-memory")]
     pub(crate) shm: Option<TransportShmConfig>,
-    pub(crate) is_lowlatency: bool,
     #[cfg(feature = "auth_usrpwd")]
     pub(crate) auth_id: UsrPwdId,
     pub(crate) patch: PatchType,

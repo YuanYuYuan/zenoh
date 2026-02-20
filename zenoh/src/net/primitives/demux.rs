@@ -23,7 +23,7 @@ use zenoh_protocol::{
     },
 };
 use zenoh_result::ZResult;
-use zenoh_runtime::ZRuntime;
+
 use zenoh_transport::{unicast::TransportUnicast, TransportPeerEventHandler};
 
 use super::Primitives;
@@ -68,9 +68,11 @@ impl DeMuxContext<'_> {
     fn prefix(&self, msg: &NetworkMessageMut) -> Option<Arc<Resource>> {
         if let Some(wire_expr) = msg.wire_expr() {
             let wire_expr = wire_expr.to_owned();
-            // Note: Using blocking lock here since InterceptorContext trait methods are sync
-            use futures::executor::block_on;
-            let tables = block_on(self.demux.face.tables.tables.read());
+            // Note: blocking here since InterceptorContext trait methods are sync;
+            // tables.read() is an async lock, so we use block_in_place to avoid blocking a worker thread
+            let tables = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(self.demux.face.tables.tables.read())
+            });
             if let Some(prefix) = tables
                 .get_mapping(&self.demux.face.state, &wire_expr.scope, wire_expr.mapping)
                 .cloned()
@@ -187,27 +189,27 @@ impl TransportPeerEventHandler for DeMux {
             NetworkBodyMut::Push(m) => {
                 let reliability = msg.reliability;
                 let msg = m.clone();
-                ZRuntime::RX.spawn(async move { face.send_push(msg, reliability).await });
+                tokio::spawn(async move { face.send_push(msg, reliability).await });
             }
             NetworkBodyMut::Declare(m) => {
                 let msg = m.clone();
-                ZRuntime::RX.spawn(async move { face.send_declare(msg).await });
+                tokio::spawn(async move { face.send_declare(msg).await });
             }
             NetworkBodyMut::Interest(m) => {
                 let msg = m.clone();
-                ZRuntime::RX.spawn(async move { face.send_interest(msg).await });
+                tokio::spawn(async move { face.send_interest(msg).await });
             }
             NetworkBodyMut::Request(m) => {
                 let msg = m.clone();
-                ZRuntime::RX.spawn(async move { face.send_request(msg).await });
+                tokio::spawn(async move { face.send_request(msg).await });
             }
             NetworkBodyMut::Response(m) => {
                 let msg = m.clone();
-                ZRuntime::RX.spawn(async move { face.send_response(msg).await });
+                tokio::spawn(async move { face.send_response(msg).await });
             }
             NetworkBodyMut::ResponseFinal(m) => {
                 let msg = m.clone();
-                ZRuntime::RX.spawn(async move { face.send_response_final(msg).await });
+                tokio::spawn(async move { face.send_response_final(msg).await });
             }
             NetworkBodyMut::OAM(m) => {
                 if let Some(transport) = self.transport.as_ref() {
@@ -215,7 +217,7 @@ impl TransportPeerEventHandler for DeMux {
                     let face = self.face.clone();
                     let transport = transport.clone();
                     let mut oam = m.clone();
-                    ZRuntime::RX.spawn(async move {
+                    tokio::spawn(async move {
                         let mut declares = vec![];
                         let ctrl_lock = zasynclock!(face.tables.ctrl_lock);
                         let mut tables = zasyncwrite!(face.tables.tables);
@@ -248,7 +250,7 @@ impl TransportPeerEventHandler for DeMux {
     fn closed(&self) {
         // Spawn async close in background since this trait method is sync
         let face = self.face.clone();
-        ZRuntime::RX.spawn(async move {
+        tokio::spawn(async move {
             face.close().await;
         });
     }

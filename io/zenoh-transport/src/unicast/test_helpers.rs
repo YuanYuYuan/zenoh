@@ -193,15 +193,8 @@ pub fn make_transport_manager_builder(
 }
 
 pub fn make_basic_transport_manager_builder(
-    lowlatency_transport: bool,
+    _lowlatency_transport: bool,
 ) -> TransportManagerBuilderUnicast {
     println!("Create transport manager builder...");
-    let config = TransportManager::config_unicast();
-    if lowlatency_transport {
-        println!("...with LowLatency transport...");
-    }
-    match lowlatency_transport {
-        true => config.lowlatency(true).qos(false),
-        false => config,
-    }
+    TransportManager::config_unicast()
 }

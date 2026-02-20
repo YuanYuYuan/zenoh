@@ -157,7 +157,7 @@ pub mod expiration {
             expiration_time: OffsetDateTime,
         ) -> Self {
             let token = CancellationToken::new();
-            let handle = zenoh_runtime::ZRuntime::Acceptor.spawn(expiration_task(
+            let handle = tokio::spawn(expiration_task(
                 link,
                 src_addr,
                 dst_addr,

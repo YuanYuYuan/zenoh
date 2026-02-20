@@ -41,7 +41,6 @@ use crate::unicast::establishment::ext::auth::Auth;
 use crate::unicast::establishment::ext::multilink::MultiLink;
 use crate::{
     unicast::{
-        lowlatency::transport::TransportUnicastLowlatency,
         transport_unicast_inner::{InitTransportError, TransportUnicastTrait},
         universal::transport::TransportUnicastUniversal,
         TransportConfigUnicast, TransportUnicast,
@@ -61,7 +60,6 @@ pub struct TransportManagerConfigUnicast {
     pub accept_pending: usize,
     pub max_sessions: usize,
     pub is_qos: bool,
-    pub is_lowlatency: bool,
     #[cfg(feature = "transport_multilink")]
     pub max_links: usize,
     #[cfg(feature = "transport_compression")]
@@ -160,7 +158,6 @@ pub struct TransportManagerBuilderUnicast {
     pub(super) max_links: usize,
     #[cfg(feature = "transport_auth")]
     pub(super) authenticator: Auth,
-    pub(super) is_lowlatency: bool,
     #[cfg(feature = "transport_compression")]
     pub(super) is_compression: bool,
 }
@@ -223,11 +220,6 @@ impl TransportManagerBuilderUnicast {
         self
     }
 
-    pub fn lowlatency(mut self, is_lowlatency: bool) -> Self {
-        self.is_lowlatency = is_lowlatency;
-        self
-    }
-
     #[cfg(feature = "transport_multilink")]
     pub fn max_links(mut self, max_links: usize) -> Self {
         self.max_links = max_links;
@@ -260,7 +252,6 @@ impl TransportManagerBuilderUnicast {
         self = self.accept_pending(*config.transport().unicast().accept_pending());
         self = self.max_sessions(*config.transport().unicast().max_sessions());
         self = self.qos(*config.transport().unicast().qos().enabled());
-        self = self.lowlatency(*config.transport().unicast().lowlatency());
 
         #[cfg(feature = "transport_multilink")]
         {
@@ -282,10 +273,6 @@ impl TransportManagerBuilderUnicast {
         self,
         #[allow(unused)] prng: &mut PseudoRng, // Required for #[cfg(feature = "transport_multilink")]
     ) -> ZResult<TransportManagerParamsUnicast> {
-        if self.is_qos && self.is_lowlatency {
-            bail!("'qos' and 'lowlatency' options are incompatible");
-        }
-
         let config = TransportManagerConfigUnicast {
             lease: self.lease,
             keep_alive: self.keep_alive,
@@ -296,7 +283,6 @@ impl TransportManagerBuilderUnicast {
             is_qos: self.is_qos,
             #[cfg(feature = "transport_multilink")]
             max_links: self.max_links,
-            is_lowlatency: self.is_lowlatency,
             #[cfg(feature = "transport_compression")]
             is_compression: self.is_compression,
         };
@@ -337,7 +323,6 @@ impl Default for TransportManagerBuilderUnicast {
             max_links: *transport.max_links(),
             #[cfg(feature = "transport_auth")]
             authenticator: Auth::default(),
-            is_lowlatency: *transport.lowlatency(),
             #[cfg(feature = "transport_compression")]
             is_compression: *compression.enabled(),
         }
@@ -669,31 +654,18 @@ impl TransportManager {
             None => None,
         };
 
-        // Select and create transport implementation depending on the cfg and enabled features
-        let t = if config.is_lowlatency {
-            tracing::debug!("Will use LowLatency transport!");
-            TransportUnicastLowlatency::make(
+        // Always use Universal transport
+        let t = link_error!(
+            TransportUnicastUniversal::make(
                 self.clone(),
                 config.clone(),
                 #[cfg(feature = "shared-memory")]
                 shm_context,
                 #[cfg(feature = "stats")]
-                stats,
-            )
-        } else {
-            tracing::debug!("Will use Universal transport!");
-            link_error!(
-                TransportUnicastUniversal::make(
-                    self.clone(),
-                    config.clone(),
-                    #[cfg(feature = "shared-memory")]
-                    shm_context,
-                    #[cfg(feature = "stats")]
-                    stats
-                ),
-                close::reason::INVALID
-            )
-        };
+                stats
+            ),
+            close::reason::INVALID
+        );
 
         // Add the link to the transport
         let (start_tx, start_rx, ack, add_link_guard) =
@@ -746,7 +718,7 @@ impl TransportManager {
             "shared-memory",
             {
                 tracing::debug!(
-            "New transport opened between {} and {} - whatami: {}, sn resolution: {:?}, initial sn: {:?}, qos: {}, shm: {:?}, multilink: {}, lowlatency: {}",
+            "New transport opened between {} and {} - whatami: {}, sn resolution: {:?}, initial sn: {:?}, qos: {}, shm: {:?}, multilink: {}",
             self.config.zid,
             config.zid,
             config.whatami,
@@ -754,21 +726,19 @@ impl TransportManager {
             config.tx_initial_sn,
             config.is_qos,
             config.shm,
-            is_multilink,
-            config.is_lowlatency
+            is_multilink
         );
             },
             {
                 tracing::debug!(
-            "New transport opened between {} and {} - whatami: {}, sn resolution: {:?}, initial sn: {:?}, qos: {:?}, multilink: {}, lowlatency: {}",
+            "New transport opened between {} and {} - whatami: {}, sn resolution: {:?}, initial sn: {:?}, qos: {:?}, multilink: {}",
             self.config.zid,
             config.zid,
             config.whatami,
             config.sn_resolution,
             config.tx_initial_sn,
             config.is_qos,
-            is_multilink,
-            config.is_lowlatency
+            is_multilink
         );
             }
         );

@@ -276,10 +276,12 @@ impl IRuntime for RuntimeState {
 
     fn get_zids(&self, whatami: WhatAmI) -> Box<dyn Iterator<Item = ZenohId> + Send + Sync> {
         Box::new(
-            zenoh_runtime::ZRuntime::Application
-                .block_in_place(self.manager().get_transports_unicast())
-                .into_iter()
-                .filter_map(move |s| {
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(self.manager().get_transports_unicast())
+            })
+            .into_iter()
+            .filter_map(move |s| {
                     s.get_whatami()
                         .ok()
                         .and_then(|what| (what == whatami).then_some(()))
@@ -293,17 +295,21 @@ impl IRuntime for RuntimeState {
     }
 
     fn get_transports(&self) -> Box<dyn Iterator<Item = Transport> + Send + Sync> {
-        let unicast_transports = zenoh_runtime::ZRuntime::Net
-            .block_in_place(self.manager.get_transports_unicast())
-            .into_iter()
-            .filter_map(|t| t.get_peer().ok())
-            .map(|ref peer| Transport::new(peer, false));
+        let unicast_transports = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(self.manager.get_transports_unicast())
+        })
+        .into_iter()
+        .filter_map(|t| t.get_peer().ok())
+        .map(|ref peer| Transport::new(peer, false));
 
-        let multicast_transports = zenoh_runtime::ZRuntime::Net
-            .block_in_place(self.manager.get_transports_multicast())
-            .into_iter()
-            .flat_map(|t| t.get_peers().ok().unwrap_or_default())
-            .map(|ref peer| Transport::new(peer, true));
+        let multicast_transports = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(self.manager.get_transports_multicast())
+        })
+        .into_iter()
+        .flat_map(|t| t.get_peers().ok().unwrap_or_default())
+        .map(|ref peer| Transport::new(peer, true));
 
         Box::new(unicast_transports.chain(multicast_transports))
     }
@@ -497,19 +503,23 @@ impl RuntimeState {
     }
 
     fn get_transports_unicast_peers(&self) -> Vec<TransportPeer> {
-        zenoh_runtime::ZRuntime::Net
-            .block_in_place(self.manager.get_transports_unicast())
-            .into_iter()
-            .filter_map(|t| t.get_peer().ok())
-            .collect::<Vec<_>>()
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(self.manager.get_transports_unicast())
+        })
+        .into_iter()
+        .filter_map(|t| t.get_peer().ok())
+        .collect::<Vec<_>>()
     }
 
     fn get_transports_multicast_peers(&self) -> Vec<Vec<TransportPeer>> {
-        zenoh_runtime::ZRuntime::Net
-            .block_in_place(self.manager.get_transports_multicast())
-            .into_iter()
-            .filter_map(|t| t.get_peers().ok())
-            .collect::<Vec<_>>()
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(self.manager.get_transports_multicast())
+        })
+        .into_iter()
+        .filter_map(|t| t.get_peers().ok())
+        .collect::<Vec<_>>()
     }
 
     fn get_links_all(&self) -> Box<dyn Iterator<Item = Link> + Send + Sync> {

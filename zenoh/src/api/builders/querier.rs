@@ -22,7 +22,6 @@ use zenoh_protocol::{
     network::request::ext::QueryTarget,
 };
 use zenoh_result::ZResult;
-use zenoh_runtime::ZRuntime;
 
 use super::sample::QoSBuilderTrait;
 #[cfg(feature = "unstable")]
@@ -273,7 +272,7 @@ impl<Handler> CancellationTokenBuilderTrait for QuerierGetBuilder<'_, '_, Handle
     ///     .await
     ///     .unwrap();
     ///
-    /// ZRuntime::Application.spawn(async move {
+    /// tokio::spawn(async move {
     ///     tokio::time::sleep(std::time::Duration::from_secs(10)).await;
     ///     ct.cancel().await.unwrap();
     /// });

@@ -397,7 +397,7 @@ impl Network {
                     let zid = link.zid;
                     let transport = link.transport.clone();
                     let mut msg = zenoh_protocol::network::NetworkMessageExt::to_owned(&msg);
-                    zenoh_runtime::ZRuntime::Net.spawn(async move {
+                    tokio::spawn(async move {
                         tracing::trace!("{} Send to {} {:?}", name, zid, msg);
                         if let Err(e) = transport.schedule(msg.as_mut()).await {
                             tracing::debug!("{} Error sending LinkStateList: {}", name, e);
@@ -926,7 +926,7 @@ impl Network {
                         let name = self.name.clone();
                         let transport = link.transport.clone();
                         let mut msg = zenoh_protocol::network::NetworkMessageExt::to_owned(&msg);
-                        zenoh_runtime::ZRuntime::Net.spawn(async move {
+                        tokio::spawn(async move {
                             tracing::trace!("{} Send to {:?} {:?}", name, transport.get_zid(), msg);
                             if let Err(e) = transport.schedule(msg.as_mut()).await {
                                 tracing::debug!("{} Error sending LinkStateList: {}", name, e);

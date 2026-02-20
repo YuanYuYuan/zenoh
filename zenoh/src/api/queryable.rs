@@ -26,7 +26,6 @@ use zenoh_protocol::{
     zenoh::{self, reply::ReplyBody, Del, Put, ResponseBody},
 };
 use zenoh_result::ZResult;
-use zenoh_runtime::ZRuntime;
 #[zenoh_macros::unstable]
 use {zenoh_config::wrappers::EntityGlobalId, zenoh_protocol::core::EntityGlobalIdProto};
 
@@ -581,7 +580,7 @@ impl Query {
         let wire_expr = self.inner.primitives.keyexpr_to_wire(&sample.key_expr);
         let zid = self.inner.zid;
         let eid = self.eid;
-        ZRuntime::Application.spawn(async move {
+        tokio::spawn(async move {
             primitives.send_response(Response {
                 rid: qid,
                 wire_expr,

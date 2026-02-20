@@ -15,7 +15,6 @@
 pub mod auth;
 #[cfg(feature = "transport_compression")]
 pub(crate) mod compression;
-pub(crate) mod lowlatency;
 #[cfg(feature = "transport_multilink")]
 pub(crate) mod multilink;
 pub(crate) mod patch;

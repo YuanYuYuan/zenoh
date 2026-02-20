@@ -371,7 +371,7 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastSerial {
                 res
             }
         };
-        let handle = zenoh_runtime::ZRuntime::Acceptor.spawn(task);
+        let handle = tokio::spawn(task);
 
         let locator = endpoint.to_locator();
         let listener = ListenerUnicastSerial::new(endpoint, token, handle);

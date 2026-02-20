@@ -391,7 +391,7 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastWs {
                 res
             }
         };
-        let handle = zenoh_runtime::ZRuntime::Acceptor.spawn(task);
+        let handle = tokio::spawn(task);
 
         let locator = endpoint.to_locator();
         let listener = ListenerUnicastWs::new(endpoint, token, handle);

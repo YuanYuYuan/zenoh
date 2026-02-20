@@ -29,7 +29,6 @@ use zenoh_config::qos::PriorityConf;
 use zenoh_core::{Resolvable, Resolve, Wait};
 use zenoh_protocol::core::CongestionControl;
 use zenoh_result::{Error, ZResult};
-use zenoh_runtime::ZRuntime;
 #[cfg(feature = "unstable")]
 use {
     zenoh_config::wrappers::EntityGlobalId, zenoh_protocol::core::EntityGlobalIdProto,
@@ -100,7 +99,7 @@ impl fmt::Debug for PublisherState {
 /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
 /// let mut subscriber = session.declare_subscriber("key/expression").await.unwrap();
 /// let publisher = session.declare_publisher("another/key/expression").await.unwrap();
-/// # ZRuntime::Application.spawn(async move {
+/// # tokio::spawn(async move {
 /// #     session.put("key/expression", "value").await.unwrap();
 /// #     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 /// #     session.close().await.unwrap();

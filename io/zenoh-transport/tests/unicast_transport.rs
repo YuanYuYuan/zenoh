@@ -1611,58 +1611,6 @@ fn transport_unicast_quic_only_mutual_wrong_client_certs_failure() {
     assert!(result.is_err());
 }
 
-#[test]
-fn transport_unicast_qos_and_lowlatency_failure() {
-    struct TestPeer;
-    impl TransportEventHandler for TestPeer {
-        fn new_unicast(
-            &self,
-            _: TransportPeer,
-            _: TransportUnicast,
-        ) -> ZResult<Arc<dyn TransportPeerEventHandler>> {
-            panic!();
-        }
-
-        fn new_multicast(
-            &self,
-            _: TransportMulticast,
-        ) -> ZResult<Arc<dyn TransportMulticastEventHandler>> {
-            panic!();
-        }
-    }
-
-    let peer_shm02_handler = Arc::new(TestPeer);
-
-    let failing_manager = TransportManager::builder()
-        .whatami(WhatAmI::Peer)
-        .unicast(
-            TransportManager::config_unicast()
-                .lowlatency(true)
-                .qos(true),
-        )
-        .build_test(peer_shm02_handler.clone());
-    assert!(failing_manager.is_err());
-
-    let good_manager1 = TransportManager::builder()
-        .whatami(WhatAmI::Peer)
-        .unicast(
-            TransportManager::config_unicast()
-                .lowlatency(false)
-                .qos(true),
-        )
-        .build_test(peer_shm02_handler.clone());
-    assert!(good_manager1.is_ok());
-
-    let good_manager2 = TransportManager::builder()
-        .whatami(WhatAmI::Peer)
-        .unicast(
-            TransportManager::config_unicast()
-                .lowlatency(true)
-                .qos(false),
-        )
-        .build_test(peer_shm02_handler.clone());
-    assert!(good_manager2.is_ok());
-}
 
 #[cfg(all(feature = "transport_quic_datagram", target_family = "unix"))]
 #[test]

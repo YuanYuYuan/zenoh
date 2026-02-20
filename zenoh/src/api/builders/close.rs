@@ -186,7 +186,7 @@ impl<TOutput: Send + 'static> IntoFuture for BackgroundCloseBuilder<TOutput> {
         Box::pin(
             async move {
                 let (tx, rx) = tokio::sync::oneshot::channel();
-                ZRuntime::Net.spawn(async move {
+                tokio::spawn(async move {
                     if tx.send(self.inner.await).is_err() {
                         panic!("BackgroundCloseBuilder: critical error sending the result");
                     }

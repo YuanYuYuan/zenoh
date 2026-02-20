@@ -713,7 +713,7 @@ pub(crate) fn finalize_pending_query(query: (Arc<Query>, CancellationToken)) {
         tracing::debug!("{}:{} Propagate final reply", query.src_face, query.src_qid);
         let primitives = query.src_face.primitives.clone();
         let rid = query.src_qid;
-        ZRuntime::Net.spawn(async move {
+        tokio::spawn(async move {
             primitives
                 .send_response_final(ResponseFinal {
                     rid,

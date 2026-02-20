@@ -682,10 +682,6 @@ validated_struct::validator! {
                 /// otherwise, only one outgoing link is allowed.
                 /// Issue https://github.com/eclipse-zenoh/zenoh/issues/1533
                 max_links: usize,
-                /// Enables the LowLatency transport (default `false`).
-                /// This option does not make LowLatency transport mandatory, the actual implementation of transport
-                /// used will depend on Establish procedure and other party's settings
-                lowlatency: bool,
                 pub qos: QoSUnicastConf {
                     /// Whether QoS is enabled or not.
                     /// If set to `false`, the QoS will be disabled. (default `true`).

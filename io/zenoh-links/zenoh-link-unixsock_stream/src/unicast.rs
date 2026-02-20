@@ -413,7 +413,7 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastUnixSocketStream {
                 res
             }
         };
-        let handle = zenoh_runtime::ZRuntime::Acceptor.spawn(task);
+        let handle = tokio::spawn(task);
 
         let locator = endpoint.to_locator();
         let listener = ListenerUnixSocketStream::new(endpoint, token, handle, lock_fd);

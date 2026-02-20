@@ -197,7 +197,7 @@ impl TransportLinkUnicastUniversal {
                 // to finish in the close() joining its handle
                 // WARN: Must be spawned on RX
 
-                zenoh_runtime::ZRuntime::RX.spawn(async move {
+                tokio::spawn(async move {
                     transport
                         .del_link(Link::new_unicast(&rx.link, priorities, reliability))
                         .await

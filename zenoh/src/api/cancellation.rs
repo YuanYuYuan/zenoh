@@ -28,7 +28,6 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use zenoh_core::{Resolvable, Wait};
 #[cfg(feature = "unstable")]
 use zenoh_result::ZResult;
-use zenoh_runtime::ZRuntime;
 
 #[zenoh_macros::pub_visibility_if_internal]
 #[derive(Debug)]
@@ -432,7 +431,7 @@ mod test {
 
         let ct_clone = ct.clone();
         let n_clone = n.clone();
-        let t = ZRuntime::Application.spawn(async move {
+        let t = tokio::spawn(async move {
             ct_clone.cancel().await.unwrap();
             n_clone.load(std::sync::atomic::Ordering::SeqCst)
         });

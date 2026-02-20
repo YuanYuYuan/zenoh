@@ -41,7 +41,6 @@ pub(crate) struct Cookie {
     pub(crate) ext_shm: ext::shm::StateAccept,
     #[cfg(feature = "transport_auth")]
     pub(crate) ext_auth: ext::auth::StateAccept,
-    pub(crate) ext_lowlatency: ext::lowlatency::StateAccept,
     #[cfg(feature = "transport_compression")]
     pub(crate) ext_compression: ext::compression::StateAccept,
     pub(crate) ext_patch: ext::patch::StateAccept,
@@ -69,7 +68,6 @@ where
         self.write(&mut *writer, &x.ext_shm)?;
         #[cfg(feature = "transport_auth")]
         self.write(&mut *writer, &x.ext_auth)?;
-        self.write(&mut *writer, &x.ext_lowlatency)?;
         #[cfg(feature = "transport_compression")]
         self.write(&mut *writer, &x.ext_compression)?;
         self.write(&mut *writer, &x.ext_patch)?;
@@ -101,7 +99,6 @@ where
         let ext_shm: ext::shm::StateAccept = self.read(&mut *reader)?;
         #[cfg(feature = "transport_auth")]
         let ext_auth: ext::auth::StateAccept = self.read(&mut *reader)?;
-        let ext_lowlatency: ext::lowlatency::StateAccept = self.read(&mut *reader)?;
         #[cfg(feature = "transport_compression")]
         let ext_compression: ext::compression::StateAccept = self.read(&mut *reader)?;
         let ext_patch: ext::patch::StateAccept = self.read(&mut *reader)?;
@@ -120,7 +117,6 @@ where
             ext_shm,
             #[cfg(feature = "transport_auth")]
             ext_auth,
-            ext_lowlatency,
             #[cfg(feature = "transport_compression")]
             ext_compression,
             ext_patch,
@@ -193,7 +189,6 @@ impl Cookie {
             ext_shm: ext::shm::StateAccept::rand(),
             #[cfg(feature = "transport_auth")]
             ext_auth: ext::auth::StateAccept::rand(),
-            ext_lowlatency: ext::lowlatency::StateAccept::rand(),
             #[cfg(feature = "transport_compression")]
             ext_compression: ext::compression::StateAccept::rand(),
             ext_patch: ext::patch::StateAccept::rand(),
