@@ -197,7 +197,8 @@ impl Gossip {
             whatami: self.graph[idx].whatami,
             locators: if details.locators {
                 if idx == self.idx {
-                    Some(self.runtime.upgrade().unwrap().get_locators())
+                    // During shutdown the runtime Weak may already be dropped; treat as no locators.
+                    self.runtime.upgrade().map(|rt| rt.get_locators())
                 } else {
                     self.graph[idx].locators.clone()
                 }
@@ -273,7 +274,9 @@ impl Gossip {
         src_whatami: WhatAmI,
     ) {
         tracing::trace!("{} Received from {} raw: {:?}", self.name, src, link_states);
-        let strong_runtime = self.runtime.upgrade().unwrap();
+        let Some(strong_runtime) = self.runtime.upgrade() else {
+            return; // Runtime already dropped (shutdown race); ignore incoming link states.
+        };
 
         let graph = &self.graph;
         let links = &mut self.links;
