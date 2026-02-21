@@ -34,7 +34,6 @@ use zenoh_protocol::{
 };
 use zenoh_sync::get_mut_unchecked;
 use zenoh_util::Timed;
-use zenoh_runtime::ZRuntime;
 
 use super::{
     face::FaceState,

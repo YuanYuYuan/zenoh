@@ -19,7 +19,6 @@ use std::{
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
-use zenoh_core::zasyncread;
 use zenoh_protocol::{
     core::Reliability,
     network::{
@@ -83,20 +82,16 @@ struct MuxContext<'a> {
 }
 
 impl MuxContext<'_> {
-    async fn prefix<'a>(&self, msg: &'a NetworkMessageMut<'a>) -> Option<Arc<Resource>> {
-        if let Some(wire_expr) = msg.wire_expr() {
-            let wire_expr = wire_expr.to_owned();
-            if let Some(face) = self.mux.face.get().and_then(|f| f.upgrade()) {
-                let tables = zasyncread!(face.tables.tables);
-                if let Some(prefix) = tables
-                    .get_sent_mapping(&face.state, &wire_expr.scope, wire_expr.mapping)
-                    .cloned()
-                {
-                    return Some(prefix);
-                }
-            }
-        }
-        None
+    // Non-blocking prefix lookup using try_read(). Returns None if the lock is
+    // contended (extremely rare on the read path) rather than blocking the caller.
+    fn try_prefix<'a>(&self, msg: &'a NetworkMessageMut<'a>) -> Option<Arc<Resource>> {
+        let wire_expr = msg.wire_expr()?;
+        let wire_expr = wire_expr.to_owned();
+        let face = self.mux.face.get().and_then(|f| f.upgrade())?;
+        let tables = face.tables.tables.try_read()?;
+        tables
+            .get_sent_mapping(&face.state, &wire_expr.scope, wire_expr.mapping)
+            .cloned()
     }
 }
 
@@ -108,8 +103,7 @@ impl InterceptorContext for MuxContext<'_> {
     fn full_expr(&self, msg: &NetworkMessageMut) -> Option<&str> {
         if self.expr.get().is_none() {
             if let Some(wire_expr) = msg.wire_expr() {
-                use futures::executor::block_on;
-                if let Some(prefix) = block_on(self.prefix(msg)) {
+                if let Some(prefix) = self.try_prefix(msg) {
                     self.expr
                         .set(prefix.expr().to_string() + wire_expr.suffix.as_ref())
                         .ok();
@@ -120,8 +114,7 @@ impl InterceptorContext for MuxContext<'_> {
     }
     fn get_cache(&self, msg: &NetworkMessageMut) -> Option<&Box<dyn Any + Send + Sync>> {
         if self.cache.get().is_none() && msg.wire_expr().is_some_and(|we| !we.has_suffix()) {
-            use futures::executor::block_on;
-            if let Some(prefix) = block_on(self.prefix(msg)) {
+            if let Some(prefix) = self.try_prefix(msg) {
                 if let Some(face) = self.mux.face.get().and_then(|f| f.upgrade()) {
                     // TODO interceptor can change between the initial load and the cache load
                     if let Some(cache) = self
@@ -335,20 +328,14 @@ struct McastMuxContext<'a> {
 }
 
 impl McastMuxContext<'_> {
-    async fn prefix<'a>(&self, msg: &'a NetworkMessageMut<'a>) -> Option<Arc<Resource>> {
-        if let Some(wire_expr) = msg.wire_expr() {
-            let wire_expr = wire_expr.to_owned();
-            if let Some(face) = self.mux.face.get() {
-                let tables = zasyncread!(face.tables.tables);
-                if let Some(prefix) = tables
-                    .get_sent_mapping(&face.state, &wire_expr.scope, wire_expr.mapping)
-                    .cloned()
-                {
-                    return Some(prefix);
-                }
-            }
-        }
-        None
+    fn try_prefix<'a>(&self, msg: &'a NetworkMessageMut<'a>) -> Option<Arc<Resource>> {
+        let wire_expr = msg.wire_expr()?;
+        let wire_expr = wire_expr.to_owned();
+        let face = self.mux.face.get()?;
+        let tables = face.tables.tables.try_read()?;
+        tables
+            .get_sent_mapping(&face.state, &wire_expr.scope, wire_expr.mapping)
+            .cloned()
     }
 }
 
@@ -360,8 +347,7 @@ impl InterceptorContext for McastMuxContext<'_> {
     fn full_expr(&self, msg: &NetworkMessageMut) -> Option<&str> {
         if self.expr.get().is_none() {
             if let Some(wire_expr) = msg.wire_expr() {
-                use futures::executor::block_on;
-                if let Some(prefix) = block_on(self.prefix(msg)) {
+                if let Some(prefix) = self.try_prefix(msg) {
                     self.expr
                         .set(prefix.expr().to_string() + wire_expr.suffix.as_ref())
                         .ok();
@@ -372,8 +358,7 @@ impl InterceptorContext for McastMuxContext<'_> {
     }
     fn get_cache(&self, msg: &NetworkMessageMut) -> Option<&Box<dyn Any + Send + Sync>> {
         if self.cache.get().is_none() && msg.wire_expr().is_some_and(|we| !we.has_suffix()) {
-            use futures::executor::block_on;
-            if let Some(prefix) = block_on(self.prefix(msg)) {
+            if let Some(prefix) = self.try_prefix(msg) {
                 if let Some(face) = self.mux.face.get() {
                     // TODO interceptor can change between the initial load and the cache load
                     if let Some(cache) = self

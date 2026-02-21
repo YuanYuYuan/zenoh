@@ -356,8 +356,7 @@ impl IRuntime for RuntimeState {
             .map(|ns| (ns / key_expr.deref()).into());
 
         let router = self.router();
-        use futures::executor::block_on;
-        let tables = block_on(router.tables.tables.read());
+        let tables = tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(router.tables.tables.read()));
 
         let (broker_hat, other_hats) = tables
             .hats

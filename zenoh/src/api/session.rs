@@ -67,7 +67,6 @@ use zenoh_result::ZResult;
 #[cfg(feature = "shared-memory")]
 use zenoh_shm::api::client_storage::ShmClientStorage;
 use zenoh_task::TaskController;
-use zenoh_runtime::ZRuntime;
 
 use super::{
     builders::close::{CloseBuilder, Closeable, Closee},

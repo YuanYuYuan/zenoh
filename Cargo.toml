@@ -20,6 +20,7 @@ exclude = [
   "commons/zenoh-protocol/fuzz",
 ]
 members = [
+  "_tmp/bench_ping_pong",
   "commons/zenoh-buffers",
   "commons/zenoh-codec",
   "commons/zenoh-collections",

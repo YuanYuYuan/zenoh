@@ -44,7 +44,6 @@ use zenoh_protocol::{
     zenoh::{PushBody, RequestBody},
 };
 use zenoh_result::ZResult;
-use zenoh_runtime::ZRuntime;
 use zenoh_transport::{multicast::TransportMulticast, unicast::TransportUnicast, TransportPeer};
 
 use super::{routing::dispatcher::face::Face, Runtime};
@@ -661,7 +660,7 @@ fn local_data(prefix: &keyexpr, context: &AdminContext, query: Query) {
             json
         };
     let mut transports: Vec<serde_json::Value> = vec![];
-    zenoh_runtime::ZRuntime::Net.block_in_place(async {
+    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(async {
         for transport in transport_mgr.get_transports_unicast().await {
             transports.push(transport_unicast_to_json(&transport));
         }
@@ -675,7 +674,7 @@ fn local_data(prefix: &keyexpr, context: &AdminContext, query: Query) {
                 }
             }
         }
-    });
+    }));
     #[cfg_attr(not(feature = "stats"), allow(unused_mut))]
     let mut json = json!({
         "zid": context.runtime.state.zid,
@@ -846,7 +845,6 @@ fn route_successor(prefix: &keyexpr, context: &AdminContext, query: Query) {
     };
     let tables = &context.runtime.state.router.tables;
     let rtables = zread!(tables.tables);
-
 
     // Try to shortcut full successor retrieval if suffix matches 'src/<zid>/dst/<zid>' pattern.
 

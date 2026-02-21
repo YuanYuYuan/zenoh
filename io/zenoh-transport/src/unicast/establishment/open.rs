@@ -217,6 +217,7 @@ impl<'a, 'b: 'a> OpenFsm for &'a mut OpenLink<'b> {
             ext_shm,
             ext_auth,
             ext_mlink,
+            ext_lowlatency: None,
             ext_compression,
             ext_patch,
             ext_region_name,
@@ -477,6 +478,7 @@ impl<'a, 'b: 'a> OpenFsm for &'a mut OpenLink<'b> {
             ext_shm,
             ext_auth,
             ext_mlink,
+            ext_lowlatency: None,
             ext_compression,
             ext_remote_bound,
         }

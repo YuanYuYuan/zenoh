@@ -212,7 +212,7 @@ where
 {
     fn wait(self) -> <Self as Resolvable>::To {
         let mut key_expr = self.key_expr?;
-        key_expr = futures::executor::block_on(self.session.declare_nonwild_prefix(key_expr))?;
+        key_expr = tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(self.session.declare_nonwild_prefix(key_expr)))?;
         let session = self.session;
         let (callback, receiver) = self.handler.into_handler();
         let callback_sync_group = crate::api::cancellation::SyncGroup::default();
@@ -257,7 +257,7 @@ impl Resolvable for SubscriberBuilder<'_, '_, Callback<Sample>, true> {
 impl Wait for SubscriberBuilder<'_, '_, Callback<Sample>, true> {
     fn wait(self) -> <Self as Resolvable>::To {
         let mut key_expr = self.key_expr?;
-        key_expr = futures::executor::block_on(self.session.declare_nonwild_prefix(key_expr))?;
+        key_expr = tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(self.session.declare_nonwild_prefix(key_expr)))?;
         self.session
             .declare_subscriber_inner(&key_expr, self.origin, self.handler, None)?;
         Ok(())

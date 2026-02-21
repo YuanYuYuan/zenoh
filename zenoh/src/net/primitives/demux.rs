@@ -66,21 +66,12 @@ struct DeMuxContext<'a> {
 
 impl DeMuxContext<'_> {
     fn prefix(&self, msg: &NetworkMessageMut) -> Option<Arc<Resource>> {
-        if let Some(wire_expr) = msg.wire_expr() {
-            let wire_expr = wire_expr.to_owned();
-            // Note: blocking here since InterceptorContext trait methods are sync;
-            // tables.read() is an async lock, so we use block_in_place to avoid blocking a worker thread
-            let tables = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(self.demux.face.tables.tables.read())
-            });
-            if let Some(prefix) = tables
-                .get_mapping(&self.demux.face.state, &wire_expr.scope, wire_expr.mapping)
-                .cloned()
-            {
-                return Some(prefix);
-            }
-        }
-        None
+        let wire_expr = msg.wire_expr()?;
+        let wire_expr = wire_expr.to_owned();
+        let tables = self.demux.face.tables.tables.try_read()?;
+        tables
+            .get_mapping(&self.demux.face.state, &wire_expr.scope, wire_expr.mapping)
+            .cloned()
     }
 }
 
