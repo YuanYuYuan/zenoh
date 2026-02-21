@@ -210,8 +210,8 @@ impl TransportPeerEventHandler for DeMux {
                     let mut oam = m.clone();
                     tokio::spawn(async move {
                         let mut declares = vec![];
-                        let ctrl_lock = zasynclock!(face.tables.ctrl_lock);
-                        let mut tables = zasyncwrite!(face.tables.tables);
+                        let ctrl_lock = face.tables.ctrl_lock.lock().await;
+                        let mut tables = face.tables.tables.write().await;
                         if let Err(e) = face.tables.hat_code.handle_oam(
                             &mut tables,
                             &face.tables,

@@ -14,7 +14,6 @@
 
 use std::sync::Arc;
 
-use zenoh_core::{zasyncread, zread};
 use zenoh_protocol::{
     core::{Region, Reliability, WireExpr},
     network::{declare::SubscriberId, push::ext, Push},
@@ -49,7 +48,7 @@ pub(crate) async fn declare_subscription<'a>(
     node_id: NodeId,
     send_declare: &'a mut SendDeclare<'a>,
 ) {
-    let rtables = zasyncread!(tables.tables);
+    let rtables = tables.tables.read().await;
     match rtables
         .get_mapping(face, &expr.scope, expr.mapping)
         .cloned()
@@ -66,7 +65,7 @@ pub(crate) async fn declare_subscription<'a>(
             let (mut res, mut wtables) =
                 if res.as_ref().map(|r| r.context.is_some()).unwrap_or(false) {
                     drop(rtables);
-                    let wtables = zasyncwrite!(tables.tables);
+                    let wtables = tables.tables.write().await;
                     (res.unwrap(), wtables)
                 } else {
                     let mut fullexpr = prefix.expr().to_string();
@@ -75,7 +74,7 @@ pub(crate) async fn declare_subscription<'a>(
                         .map(|ke| Resource::get_matches(&rtables, ke))
                         .unwrap_or_default();
                     drop(rtables);
-                    let mut wtables = zasyncwrite!(tables.tables);
+                    let mut wtables = tables.tables.write().await;
                     let mut res = Resource::make_resource(
                         hat_code,
                         &mut wtables,
@@ -122,7 +121,7 @@ pub(crate) async fn undeclare_subscription<'a>(
     let res = if expr.is_empty() {
         None
     } else {
-        let rtables = zasyncread!(tables.tables);
+        let rtables = tables.tables.read().await;
         match rtables.get_mapping(face, &expr.scope, expr.mapping) {
             Some(prefix) => match Resource::get_resource(prefix, expr.suffix.as_ref()) {
                 Some(res) => Some(res),
@@ -138,7 +137,7 @@ pub(crate) async fn undeclare_subscription<'a>(
             }
         }
     };
-    let mut wtables = zasyncwrite!(tables.tables);
+    let mut wtables = tables.tables.write().await;
     if let Some(mut res) =
         hat_code.undeclare_subscription(&mut wtables, face, id, res, node_id, send_declare)
     {
@@ -274,7 +273,12 @@ pub async fn route_data(
     reliability: Reliability,
     consume: bool,
 ) {
-    let tables = zasyncread!(tables_ref.tables);
+    // Fast path: try_read() succeeds without blocking when no writer holds the lock (99.9% of
+    // messages). Falls back to async wait only under declaration churn.
+    let tables = match tables_ref.tables.try_read() {
+        Some(g) => g,
+        None => tables_ref.tables.read().await,
+    };
     match tables.get_mapping(face, &msg.wire_expr.scope, msg.wire_expr.mapping) {
         Some(prefix) => {
             tracing::trace!(

@@ -78,7 +78,7 @@ pub(crate) async fn declare_queryable<'a>(
     node_id: NodeId,
     send_declare: &'a mut SendDeclare<'a>,
 ) {
-    let rtables = zasyncread!(tables.tables);
+    let rtables = tables.tables.read().await;
     match rtables
         .get_mapping(face, &expr.scope, expr.mapping)
         .cloned()
@@ -95,7 +95,7 @@ pub(crate) async fn declare_queryable<'a>(
             let (mut res, mut wtables) =
                 if res.as_ref().map(|r| r.context.is_some()).unwrap_or(false) {
                     drop(rtables);
-                    let wtables = zasyncwrite!(tables.tables);
+                    let wtables = tables.tables.write().await;
                     (res.unwrap(), wtables)
                 } else {
                     let mut fullexpr = prefix.expr().to_string();
@@ -104,7 +104,7 @@ pub(crate) async fn declare_queryable<'a>(
                         .map(|ke| Resource::get_matches(&rtables, ke))
                         .unwrap_or_default();
                     drop(rtables);
-                    let mut wtables = zasyncwrite!(tables.tables);
+                    let mut wtables = tables.tables.write().await;
                     let mut res = Resource::make_resource(
                         hat_code,
                         &mut wtables,
@@ -160,7 +160,7 @@ pub(crate) async fn undeclare_queryable<'a>(
     let res = if expr.is_empty() {
         None
     } else {
-        let rtables = zasyncread!(tables.tables);
+        let rtables = tables.tables.read().await;
         match rtables.get_mapping(face, &expr.scope, expr.mapping) {
             Some(prefix) => match Resource::get_resource(prefix, expr.suffix.as_ref()) {
                 Some(res) => Some(res),
@@ -339,7 +339,7 @@ pub(crate) async fn undeclare_queryable<'a>(
             }
         }
     };
-    let mut wtables = zasyncwrite!(tables.tables);
+    let mut wtables = tables.tables.write().await;
     if let Some(mut res) =
         hat_code.undeclare_queryable(&mut wtables, face, id, res, node_id, send_declare)
     {
@@ -435,7 +435,7 @@ impl Timed for QueryCleanup {
                     ext_respid,
                 },
             );
-            let queries_lock = zasyncwrite!(self.tables.queries_lock);
+            let queries_lock = self.tables.queries_lock.write().await;
             if let Some(query) = get_mut_unchecked(&mut face)
                 .pending_queries
                 .remove(&self.qid)
@@ -485,7 +485,12 @@ fn get_query_route(
 
 #[allow(clippy::too_many_arguments)]
 pub async fn route_query(tables_ref: &Arc<TablesLock>, face: &Arc<FaceState>, msg: &mut Request) {
-    let rtables = zasyncread!(tables_ref.tables);
+    // Fast path: try_read() succeeds without blocking when no writer holds the lock (99.9% of
+    // messages). Falls back to async wait only under declaration churn.
+    let rtables = match tables_ref.tables.try_read() {
+        Some(g) => g,
+        None => tables_ref.tables.read().await,
+    };
     match rtables.get_mapping(face, &msg.wire_expr.scope, msg.wire_expr.mapping) {
         Some(prefix) => {
             tracing::debug!(
@@ -517,7 +522,7 @@ pub async fn route_query(tables_ref: &Arc<TablesLock>, face: &Arc<FaceState>, ms
                     src_qid: msg.id,
                 });
 
-                let queries_lock = zasyncwrite!(tables_ref.queries_lock);
+                let queries_lock = tables_ref.queries_lock.write().await;
                 let route = compute_final_route(
                     tables_ref.hat_code.as_ref(),
                     &rtables,
@@ -612,7 +617,10 @@ pub(crate) async fn route_send_response(
     face: &mut Arc<FaceState>,
     msg: &mut Response,
 ) {
-    let tables = zasyncread!(tables_ref.tables);
+    let tables = match tables_ref.tables.try_read() {
+        Some(g) => g,
+        None => tables_ref.tables.read().await,
+    };
     match tables.get_mapping(face, &msg.wire_expr.scope, msg.wire_expr.mapping) {
         Some(prefix) => {
             let expr = msg
@@ -624,7 +632,7 @@ pub(crate) async fn route_send_response(
             let payload_observer = super::stats::PayloadObserver::new(msg, expr.as_ref(), &tables);
             #[cfg(feature = "stats")]
             payload_observer.observe_payload(zenoh_stats::Rx, face, msg);
-            let queries_lock = zasyncread!(tables_ref.queries_lock);
+            let queries_lock = tables_ref.queries_lock.read().await;
             match face.pending_queries.get(&msg.rid) {
                 Some((query, _)) => {
                     if let Some(expr) = expr {
@@ -679,7 +687,7 @@ pub(crate) async fn route_send_response_final(
     face: &mut Arc<FaceState>,
     qid: RequestId,
 ) {
-    let queries_lock = zasyncwrite!(tables_ref.queries_lock);
+    let queries_lock = tables_ref.queries_lock.write().await;
     match get_mut_unchecked(face).pending_queries.remove(&qid) {
         Some(query) => {
             drop(queries_lock);
@@ -698,7 +706,7 @@ pub(crate) async fn route_send_response_final(
 }
 
 pub(crate) async fn finalize_pending_queries(tables_ref: &TablesLock, face: &mut Arc<FaceState>) {
-    let queries_lock = zasyncwrite!(tables_ref.queries_lock);
+    let queries_lock = tables_ref.queries_lock.write().await;
     for (_, query) in get_mut_unchecked(face).pending_queries.drain() {
         finalize_pending_query(query);
     }

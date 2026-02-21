@@ -39,7 +39,7 @@ pub(crate) async fn declare_token<'a>(
     interest_id: Option<InterestId>,
     send_declare: &'a mut SendDeclare<'a>,
 ) {
-    let rtables = zasyncread!(tables.tables);
+    let rtables = tables.tables.read().await;
     match rtables
         .get_mapping(face, &expr.scope, expr.mapping)
         .cloned()
@@ -56,7 +56,7 @@ pub(crate) async fn declare_token<'a>(
             let (mut res, mut wtables) =
                 if res.as_ref().map(|r| r.context.is_some()).unwrap_or(false) {
                     drop(rtables);
-                    let wtables = zasyncwrite!(tables.tables);
+                    let wtables = tables.tables.write().await;
                     (res.unwrap(), wtables)
                 } else {
                     let mut fullexpr = prefix.expr().to_string();
@@ -65,7 +65,7 @@ pub(crate) async fn declare_token<'a>(
                         .map(|ke| Resource::get_matches(&rtables, ke))
                         .unwrap_or_default();
                     drop(rtables);
-                    let mut wtables = zasyncwrite!(tables.tables);
+                    let mut wtables = tables.tables.write().await;
                     let mut res = Resource::make_resource(
                         hat_code,
                         &mut wtables,
@@ -99,9 +99,9 @@ pub(crate) async fn undeclare_token<'a>(
     send_declare: &'a mut SendDeclare<'a>,
 ) {
     let (res, mut wtables) = if expr.wire_expr.is_empty() {
-        (None, zasyncwrite!(tables.tables))
+        (None, tables.tables.write().await)
     } else {
-        let rtables = zasyncread!(tables.tables);
+        let rtables = tables.tables.read().await;
         match rtables
             .get_mapping(face, &expr.wire_expr.scope, expr.wire_expr.mapping)
             .cloned()
@@ -110,7 +110,7 @@ pub(crate) async fn undeclare_token<'a>(
                 match Resource::get_resource(&prefix, expr.wire_expr.suffix.as_ref()) {
                     Some(res) => {
                         drop(rtables);
-                        (Some(res), zasyncwrite!(tables.tables))
+                        (Some(res), tables.tables.write().await)
                     }
                     None => {
                         // Here we create a Resource that will immediately be removed after treatment
@@ -121,7 +121,7 @@ pub(crate) async fn undeclare_token<'a>(
                             .map(|ke| Resource::get_matches(&rtables, ke))
                             .unwrap_or_default();
                         drop(rtables);
-                        let mut wtables = zasyncwrite!(tables.tables);
+                        let mut wtables = tables.tables.write().await;
                         let mut res = Resource::make_resource(
                             hat_code,
                             &mut wtables,

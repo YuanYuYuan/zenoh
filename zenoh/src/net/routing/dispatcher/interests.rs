@@ -173,7 +173,7 @@ impl CurrentInterestCleanup {
 
     async fn execute(&mut self, print_warning: bool) {
         if let Some(mut face) = self.face.upgrade() {
-            let ctrl_lock = zasynclock!(self.tables.ctrl_lock);
+            let ctrl_lock = self.tables.ctrl_lock.lock().await;
             if let Some(interest) = get_mut_unchecked(&mut face)
                 .pending_current_interests
                 .remove(&self.id)
@@ -224,7 +224,7 @@ pub(crate) async fn declare_interest<'a>(
     }
 
     if let Some(expr) = expr {
-        let rtables = zasyncread!(tables_ref.tables);
+        let rtables = tables_ref.tables.read().await;
         match rtables
             .get_mapping(face, &expr.scope, expr.mapping)
             .cloned()
@@ -241,7 +241,7 @@ pub(crate) async fn declare_interest<'a>(
                 let (mut res, mut wtables) =
                     if res.as_ref().map(|r| r.context.is_some()).unwrap_or(false) {
                         drop(rtables);
-                        let wtables = zasyncwrite!(tables_ref.tables);
+                        let wtables = tables_ref.tables.write().await;
                         (res.unwrap(), wtables)
                     } else {
                         let mut fullexpr = prefix.expr().to_string();
@@ -250,7 +250,7 @@ pub(crate) async fn declare_interest<'a>(
                             .map(|ke| Resource::get_matches(&rtables, ke))
                             .unwrap_or_default();
                         drop(rtables);
-                        let mut wtables = zasyncwrite!(tables_ref.tables);
+                        let mut wtables = tables_ref.tables.write().await;
                         let mut res = Resource::make_resource(
                             hat_code,
                             &mut wtables,
@@ -281,7 +281,7 @@ pub(crate) async fn declare_interest<'a>(
             ),
         }
     } else {
-        let mut wtables = zasyncwrite!(tables_ref.tables);
+        let mut wtables = tables_ref.tables.write().await;
         hat_code.declare_interest(
             &mut wtables,
             tables_ref,
@@ -474,6 +474,6 @@ pub(crate) async fn undeclare_interest(
 ) {
     tracing::debug!("{} Undeclare interest {}", face, id,);
     unregister_expr_interest(tables, face, id).await;
-    let mut wtables = zasyncwrite!(tables.tables);
+    let mut wtables = tables.tables.write().await;
     hat_code.undeclare_interest(&mut wtables, face, id);
 }

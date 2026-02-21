@@ -23,7 +23,6 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 use zenoh_collections::IntHashMap;
-use zenoh_core::{zasynclock, zasyncwrite};
 use zenoh_protocol::{
     core::{Bound, ExprId, Region, Reliability, WhatAmI, WireExpr, ZenohIdProto},
     network::{
@@ -541,7 +540,7 @@ impl Face {
 #[async_trait]
 impl Primitives for Face {
     async fn send_interest(&self, mut msg: zenoh_protocol::network::Interest) -> bool {
-        let ctrl_lock = zasynclock!(self.tables.ctrl_lock);
+        let ctrl_lock = self.tables.ctrl_lock.lock().await;
         if msg.mode != InterestMode::Final {
             let mut declares = vec![];
             declare_interest(
@@ -571,7 +570,7 @@ impl Primitives for Face {
     }
 
     async fn send_declare(&self, mut msg: zenoh_protocol::network::Declare) -> bool {
-        let ctrl_lock = zasynclock!(self.tables.ctrl_lock);
+        let ctrl_lock = self.tables.ctrl_lock.lock().await;
         match &mut msg.body {
             zenoh_protocol::network::DeclareBody::DeclareKeyExpr(m) => {
                 register_expr(&self.tables, &mut self.state.clone(), m.id, &m.wire_expr).await;
@@ -672,7 +671,7 @@ impl Primitives for Face {
                     return;
                 };
 
-                    let mut wtables = zasyncwrite!(self.tables.tables);
+                    let mut wtables = self.tables.tables.write().await;
                     let mut declares = vec![];
                     declare_final(
                         self.tables.hat_code.as_ref(),
@@ -727,7 +726,7 @@ impl Primitives for Face {
         state.task_controller.terminate_all(Duration::from_secs(10));
         finalize_pending_queries(&self.tables, &mut state);
         let mut declares = vec![];
-        let ctrl_lock = zasynclock!(self.tables.ctrl_lock);
+        let ctrl_lock = self.tables.ctrl_lock.lock().await;
         finalize_pending_interests(&self.tables, &mut state, &mut |p, m| {
             declares.push((p.clone(), m))
         });
