@@ -112,18 +112,25 @@ struct AtomicBackoff {
     first_write: CachePadded<AtomicMicroSeconds>,
 }
 
+/// Shared state between StageIn and StageOut for a single priority queue.
+/// Merging these two formerly separate Arc allocations improves cache locality.
+struct PerPriorityShared {
+    current: StdMutex<Current>,
+    backoff: AtomicBackoff,
+}
+
 // Inner structure to link the initial stage with the final stage of the pipeline
 struct StageInOut {
     n_out_w: Notifier,
     s_out_w: RingBufferWriter<BoxedWBatch, RBLEN>,
-    atomic_backoff: Arc<AtomicBackoff>,
+    shared: Arc<PerPriorityShared>,
 }
 
 impl StageInOut {
     #[inline]
     fn notify(&self, bytes: BatchSize) {
-        self.atomic_backoff.bytes.store(bytes, Ordering::Relaxed);
-        if !self.atomic_backoff.active.load(Ordering::Relaxed) {
+        self.shared.backoff.bytes.store(bytes, Ordering::Relaxed);
+        if !self.shared.backoff.active.load(Ordering::Relaxed) {
             let _ = self.n_out_w.notify();
         }
     }
@@ -131,7 +138,7 @@ impl StageInOut {
     #[inline]
     fn move_batch(&mut self, batch: BoxedWBatch) {
         let _ = self.s_out_w.push(batch);
-        self.atomic_backoff.bytes.store(0, Ordering::Relaxed);
+        self.shared.backoff.bytes.store(0, Ordering::Relaxed);
         let _ = self.n_out_w.notify();
     }
 }
@@ -158,7 +165,7 @@ impl Current {
 
 // Inner structure containing mutexes for current serialization batch and SNs
 struct StageInMutex {
-    current: Arc<StdMutex<Current>>,
+    shared: Arc<PerPriorityShared>,
     priority: TransportPriorityTx,
 }
 
@@ -299,7 +306,7 @@ impl StageIn {
         deadline: &mut Deadline,
     ) -> Result<bool, TransportClosed> {
         // Lock the current serialization batch.
-        let mut c_guard = zlock!(self.mutex.current);
+        let mut c_guard = zlock!(self.mutex.shared.current);
         c_guard.notify_pending();
 
         macro_rules! zgetbatch_rets {
@@ -310,7 +317,7 @@ impl StageIn {
                         None => match self.s_ref.pull() {
                             Some(mut batch) => {
                                 batch.clear();
-                                self.s_out.atomic_backoff.first_write.store(
+                                self.s_out.shared.backoff.first_write.store(
                                     LOCAL_EPOCH.elapsed().as_micros() as MicroSeconds,
                                     Ordering::Relaxed,
                                 );
@@ -463,7 +470,7 @@ impl StageIn {
     #[inline]
     fn push_transport_message(&mut self, msg: TransportMessage) -> bool {
         // Lock the current serialization batch.
-        let mut c_guard = zlock!(self.mutex.current);
+        let mut c_guard = zlock!(self.mutex.shared.current);
         c_guard.notify_pending();
 
         macro_rules! zgetbatch_rets {
@@ -474,7 +481,7 @@ impl StageIn {
                         None => match self.s_ref.pull() {
                             Some(mut batch) => {
                                 batch.clear();
-                                self.s_out.atomic_backoff.first_write.store(
+                                self.s_out.shared.backoff.first_write.store(
                                     LOCAL_EPOCH.elapsed().as_micros() as MicroSeconds,
                                     Ordering::Relaxed,
                                 );
@@ -538,16 +545,16 @@ enum Pull {
 struct Backoff {
     threshold: MicroSeconds,
     last_bytes: BatchSize,
-    atomic: Arc<AtomicBackoff>,
+    shared: Arc<PerPriorityShared>,
     // active: bool,
 }
 
 impl Backoff {
-    fn new(threshold: Duration, atomic: Arc<AtomicBackoff>) -> Self {
+    fn new(threshold: Duration, shared: Arc<PerPriorityShared>) -> Self {
         Self {
             threshold: threshold.as_micros() as MicroSeconds,
             last_bytes: 0,
-            atomic,
+            shared,
             // active: false,
         }
     }
@@ -556,7 +563,7 @@ impl Backoff {
 // Inner structure to link the final stage with the initial stage of the pipeline
 struct StageOutIn {
     s_out_r: RingBufferReader<BoxedWBatch, RBLEN>,
-    current: Arc<StdMutex<Current>>,
+    shared: Arc<PerPriorityShared>,
     backoff: Backoff,
 }
 
@@ -564,7 +571,7 @@ impl StageOutIn {
     #[inline]
     fn try_pull(&mut self) -> Pull {
         if let Some(batch) = self.s_out_r.pull() {
-            self.backoff.atomic.active.store(false, Ordering::Relaxed);
+            self.backoff.shared.backoff.active.store(false, Ordering::Relaxed);
             return Pull::Some(batch);
         }
 
@@ -573,12 +580,12 @@ impl StageOutIn {
 
     fn try_pull_deep(&mut self) -> Pull {
         // Verify first backoff is not active
-        let mut pull = !self.backoff.atomic.active.load(Ordering::Relaxed);
+        let mut pull = !self.backoff.shared.backoff.active.load(Ordering::Relaxed);
 
         // If backoff is active, verify the current number of bytes is equal to the old number
         // of bytes seen in the previous backoff iteration
         if !pull {
-            let new_bytes = self.backoff.atomic.bytes.load(Ordering::Relaxed);
+            let new_bytes = self.backoff.shared.backoff.bytes.load(Ordering::Relaxed);
             let old_bytes = self.backoff.last_bytes;
             self.backoff.last_bytes = new_bytes;
 
@@ -589,7 +596,7 @@ impl StageOutIn {
         let mut backoff = 0;
         if !pull {
             let diff = (LOCAL_EPOCH.elapsed().as_micros() as MicroSeconds)
-                .saturating_sub(self.backoff.atomic.first_write.load(Ordering::Relaxed));
+                .saturating_sub(self.backoff.shared.backoff.first_write.load(Ordering::Relaxed));
 
             if diff >= self.backoff.threshold {
                 pull = true;
@@ -600,8 +607,8 @@ impl StageOutIn {
 
         if pull {
             // It seems no new bytes have been written on the batch, try to pull
-            if let Ok(mut g) = self.current.try_lock() {
-                self.backoff.atomic.active.store(false, Ordering::Relaxed);
+            if let Ok(mut g) = self.shared.current.try_lock() {
+                self.backoff.shared.backoff.active.store(false, Ordering::Relaxed);
 
                 // First try to pull from stage OUT to make sure we are not in the case
                 // where new_bytes == old_bytes are because of two identical serializations
@@ -623,7 +630,7 @@ impl StageOutIn {
         }
 
         // Activate backoff
-        self.backoff.atomic.active.store(true, Ordering::Relaxed);
+        self.backoff.shared.backoff.active.store(true, Ordering::Relaxed);
 
         // Do backoff
         Pull::Backoff(backoff)
@@ -747,17 +754,19 @@ impl TransmissionPipeline {
             // Create the refill ring buffer
             // This is a SPSC ring buffer
             let (s_out_w, s_out_r) = RingBuffer::<BoxedWBatch, RBLEN>::init();
-            let current = Arc::new(StdMutex::new(Current {
-                batch: None,
-                status: status.clone(),
-                prioflag: 1 << (prio as u8),
-            }));
-            let bytes = Arc::new(AtomicBackoff {
-                active: CachePadded::new(AtomicBool::new(false)),
-                bytes: CachePadded::new(AtomicBatchSize::new(0)),
-                first_write: CachePadded::new(AtomicMicroSeconds::new(
-                    LOCAL_EPOCH.elapsed().as_micros() as MicroSeconds,
-                )),
+            let shared = Arc::new(PerPriorityShared {
+                current: StdMutex::new(Current {
+                    batch: None,
+                    status: status.clone(),
+                    prioflag: 1 << (prio as u8),
+                }),
+                backoff: AtomicBackoff {
+                    active: CachePadded::new(AtomicBool::new(false)),
+                    bytes: CachePadded::new(AtomicBatchSize::new(0)),
+                    first_write: CachePadded::new(AtomicMicroSeconds::new(
+                        LOCAL_EPOCH.elapsed().as_micros() as MicroSeconds,
+                    )),
+                },
             });
 
             stage_in.push(AsyncMutex::new(StageIn {
@@ -770,10 +779,10 @@ impl TransmissionPipeline {
                 s_out: StageInOut {
                     n_out_w: n_out_w.clone(),
                     s_out_w,
-                    atomic_backoff: bytes.clone(),
+                    shared: shared.clone(),
                 },
                 mutex: StageInMutex {
-                    current: current.clone(),
+                    shared: shared.clone(),
                     priority: priority[prio].clone(),
                 },
                 fragbuf: ZBuf::empty(),
@@ -785,8 +794,8 @@ impl TransmissionPipeline {
             stage_out.push(StageOut {
                 s_in: StageOutIn {
                     s_out_r,
-                    current,
-                    backoff: Backoff::new(config.batching_time_limit, bytes),
+                    shared: shared.clone(),
+                    backoff: Backoff::new(config.batching_time_limit, shared),
                 },
                 s_ref: StageOutRefill { n_ref_w, s_ref_w },
                 n_out_r,
@@ -1053,9 +1062,9 @@ impl PipelineConsumer for TransmissionPipelineConsumer {
         let locks = self
             .stage_out
             .iter()
-            .map(|x| x.s_in.current.clone())
+            .map(|x| x.s_in.shared.clone())
             .collect::<Vec<_>>();
-        let mut currents: Vec<_> = locks.iter().map(|x| zlock!(x)).collect::<Vec<_>>();
+        let mut currents: Vec<_> = locks.iter().map(|x| zlock!(x.current)).collect::<Vec<_>>();
 
         for (prio, s_out) in self.stage_out.iter_mut().enumerate() {
             let mut bs = s_out.drain(&mut currents[prio]);
