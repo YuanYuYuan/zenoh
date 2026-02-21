@@ -14,6 +14,7 @@
 pub(crate) mod transport;
 
 mod link;
+#[cfg(feature = "uring")]
 mod pooled_buffer;
 mod rx;
 mod tx;
