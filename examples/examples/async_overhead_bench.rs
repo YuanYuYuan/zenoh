@@ -16,17 +16,23 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::time::sleep;
 
 const PAYLOAD_SIZE: usize = 64;
-const FREQUENCY: u64 = 200; // Hz
-const WARMUP_SAMPLES: usize = 200;  // 1 second warmup
-const TEST_SAMPLES: usize = 1000;   // 5 seconds test
+const WARMUP_SAMPLES: usize = 200;
+const TEST_SAMPLES: usize = 1000;
+
+static FREQUENCY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+fn freq() -> u64 { *FREQUENCY.get().unwrap_or(&200) }
+
+static ZENOH_PORT: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
+fn zenoh_port() -> u16 { *ZENOH_PORT.get().unwrap_or(&7448) }
+fn zenoh_loop_port() -> u16 { zenoh_port() + 2 }
 
 // ============================================================================
 // Pure Tokio TCP Baseline
 // ============================================================================
 
 async fn tokio_tcp_server() {
-    let listener = TcpListener::bind("127.0.0.1:7447").await.unwrap();
-    println!("Tokio TCP server listening on 127.0.0.1:7447");
+    let listener = TcpListener::bind(format!("127.0.0.1:{}", zenoh_port())).await.unwrap();
+    println!("Tokio TCP server listening on 127.0.0.1:{}", zenoh_port());
 
     let (mut socket, _) = listener.accept().await.unwrap();
     let mut buf = vec![0u8; PAYLOAD_SIZE];
@@ -49,12 +55,12 @@ async fn tokio_tcp_client() {
     // Wait for server
     sleep(Duration::from_millis(500)).await;
 
-    let mut stream = TcpStream::connect("127.0.0.1:7447").await.unwrap();
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", zenoh_port())).await.unwrap();
     let payload = vec![42u8; PAYLOAD_SIZE];
     let mut buf = vec![0u8; PAYLOAD_SIZE];
 
     println!("=== Pure Tokio TCP Benchmark ===");
-    println!("Payload: {} bytes, Frequency: {} Hz", PAYLOAD_SIZE, FREQUENCY);
+    println!("Payload: {} bytes, Frequency: {} Hz", PAYLOAD_SIZE, freq());
 
     // Warmup
     println!("Warming up ({} samples)...", WARMUP_SAMPLES);
@@ -66,7 +72,7 @@ async fn tokio_tcp_client() {
     // Benchmark
     println!("Running benchmark ({} samples)...", TEST_SAMPLES);
     let mut samples = Vec::with_capacity(TEST_SAMPLES);
-    let interval = Duration::from_micros(1_000_000 / FREQUENCY);
+    let interval = Duration::from_micros(1_000_000 / freq());
 
     for _ in 0..TEST_SAMPLES {
         let start = Instant::now();
@@ -88,11 +94,10 @@ async fn tokio_tcp_client() {
 // Zenoh Callback + Spawn Pattern
 // ============================================================================
 
-/// Build a zenoh config for the pong side: listen on explicit TCP address.
-fn pong_config() -> zenoh::Config {
+fn make_pong_config(port: u16) -> zenoh::Config {
     let mut config = zenoh::Config::default();
     config
-        .insert_json5("listen/endpoints", r#"["tcp/127.0.0.1:7448"]"#)
+        .insert_json5("listen/endpoints", &format!(r#"["tcp/127.0.0.1:{port}"]"#))
         .unwrap();
     config
         .insert_json5("scouting/multicast/enabled", "false")
@@ -100,17 +105,21 @@ fn pong_config() -> zenoh::Config {
     config
 }
 
-/// Build a zenoh config for the ping side: connect to pong's explicit TCP address.
-fn ping_config() -> zenoh::Config {
+fn make_ping_config(port: u16) -> zenoh::Config {
     let mut config = zenoh::Config::default();
     config
-        .insert_json5("connect/endpoints", r#"["tcp/127.0.0.1:7448"]"#)
+        .insert_json5("connect/endpoints", &format!(r#"["tcp/127.0.0.1:{port}"]"#))
         .unwrap();
     config
         .insert_json5("scouting/multicast/enabled", "false")
         .unwrap();
     config
 }
+
+fn pong_config() -> zenoh::Config { make_pong_config(zenoh_port()) }
+fn ping_config() -> zenoh::Config { make_ping_config(zenoh_port()) }
+fn loop_pong_config() -> zenoh::Config { make_pong_config(zenoh_loop_port()) }
+fn loop_ping_config() -> zenoh::Config { make_ping_config(zenoh_loop_port()) }
 
 async fn zenoh_callback_pong() {
     use std::sync::{atomic::{AtomicU64, Ordering}, Arc};
@@ -161,7 +170,7 @@ async fn zenoh_callback_ping() {
     sleep(Duration::from_millis(500)).await;
 
     println!("=== Zenoh Callback+Spawn Benchmark ===");
-    println!("Payload: {} bytes, Frequency: {} Hz", PAYLOAD_SIZE, FREQUENCY);
+    println!("Payload: {} bytes, Frequency: {} Hz", PAYLOAD_SIZE, freq());
 
     let session = zenoh::open(ping_config()).await.unwrap();
 
@@ -173,32 +182,46 @@ async fn zenoh_callback_ping() {
         .await
         .unwrap();
 
-    // Allow time for declaration exchange to complete over the TCP link
-    // before publishing the first message.
-    sleep(Duration::from_secs(1)).await;
+    // Allow time for declaration exchange to complete over the TCP link.
+    sleep(Duration::from_secs(5)).await;
 
     let payload: ZBytes = vec![42u8; PAYLOAD_SIZE].into();
 
-    // Warmup
-    println!("Warming up ({} samples)...", WARMUP_SAMPLES);
-    for i in 0..WARMUP_SAMPLES {
-        eprintln!("[ping] warmup #{i}: publishing...");
+    // Wait for routing to converge: probe with 500ms timeout until first reply (max 60s).
+    let mut converged = false;
+    for _ in 0..120 {
         publisher.put(payload.clone()).await.unwrap();
-        eprintln!("[ping] warmup #{i}: published, waiting recv...");
-        let _ = subscriber.recv_async().await;
-        eprintln!("[ping] warmup #{i}: recv complete");
-        if i >= 3 { break; } // Only debug first 4 samples then run normally
+        if tokio::time::timeout(Duration::from_millis(500), subscriber.recv_async())
+            .await
+            .is_ok_and(|r| r.is_ok())
+        {
+            converged = true;
+            break;
+        }
     }
-    // Remaining warmup without debug
-    for _ in 4..WARMUP_SAMPLES {
+    if !converged {
+        eprintln!("ERROR: routing did not converge after 60s — aborting");
+        return;
+    }
+
+    // Drain any stale replies that may have accumulated during the convergence probe.
+    sleep(Duration::from_millis(200)).await;
+    while subscriber.try_recv().is_ok_and(|v| v.is_some()) {}
+
+    // Warmup (with per-sample timeout to avoid indefinite hang)
+    println!("Warming up ({} samples)...", WARMUP_SAMPLES);
+    for _ in 0..WARMUP_SAMPLES {
         publisher.put(payload.clone()).await.unwrap();
-        let _ = subscriber.recv_async().await;
+        match tokio::time::timeout(Duration::from_secs(5), subscriber.recv_async()).await {
+            Ok(Ok(_)) => {}
+            _ => { eprintln!("WARNING: warmup sample timed out"); break; }
+        }
     }
 
     // Benchmark
     println!("Running benchmark ({} samples)...", TEST_SAMPLES);
     let mut samples = Vec::with_capacity(TEST_SAMPLES);
-    let interval = Duration::from_micros(1_000_000 / FREQUENCY);
+    let interval = Duration::from_micros(1_000_000 / freq());
 
     for _ in 0..TEST_SAMPLES {
         let start = Instant::now();
@@ -221,7 +244,7 @@ async fn zenoh_callback_ping() {
 
 async fn zenoh_loop_pong() {
     println!("Starting Zenoh async loop pong server...");
-    let session = zenoh::open(pong_config()).await.unwrap();
+    let session = zenoh::open(loop_pong_config()).await.unwrap();
 
     let publisher = session
         .declare_publisher("test/pong")
@@ -256,9 +279,9 @@ async fn zenoh_loop_ping() {
     sleep(Duration::from_millis(500)).await;
 
     println!("=== Zenoh Async Loop Benchmark ===");
-    println!("Payload: {} bytes, Frequency: {} Hz", PAYLOAD_SIZE, FREQUENCY);
+    println!("Payload: {} bytes, Frequency: {} Hz", PAYLOAD_SIZE, freq());
 
-    let session = zenoh::open(ping_config()).await.unwrap();
+    let session = zenoh::open(loop_ping_config()).await.unwrap();
 
     let mut subscriber = session.declare_subscriber("test/pong").await.unwrap();
     let publisher = session
@@ -269,21 +292,45 @@ async fn zenoh_loop_ping() {
         .unwrap();
 
     // Allow time for declaration exchange to complete over the TCP link.
-    sleep(Duration::from_secs(1)).await;
+    sleep(Duration::from_secs(5)).await;
 
     let payload: ZBytes = vec![42u8; PAYLOAD_SIZE].into();
 
-    // Warmup
+    // Wait for routing to converge: probe with 500ms timeout until first reply (max 60s).
+    let mut converged = false;
+    for _ in 0..120 {
+        publisher.put(payload.clone()).await.unwrap();
+        if tokio::time::timeout(Duration::from_millis(500), subscriber.recv_async())
+            .await
+            .is_ok_and(|r| r.is_ok())
+        {
+            converged = true;
+            break;
+        }
+    }
+    if !converged {
+        eprintln!("ERROR: routing did not converge after 60s — aborting");
+        return;
+    }
+
+    // Drain any stale replies that may have accumulated during the convergence probe.
+    sleep(Duration::from_millis(200)).await;
+    while subscriber.try_recv().is_ok_and(|v| v.is_some()) {}
+
+    // Warmup (with per-sample timeout to avoid indefinite hang)
     println!("Warming up ({} samples)...", WARMUP_SAMPLES);
     for _ in 0..WARMUP_SAMPLES {
         publisher.put(payload.clone()).await.unwrap();
-        let _ = subscriber.recv_async().await;
+        match tokio::time::timeout(Duration::from_secs(5), subscriber.recv_async()).await {
+            Ok(Ok(_)) => {}
+            _ => { eprintln!("WARNING: warmup sample timed out"); break; }
+        }
     }
 
     // Benchmark
     println!("Running benchmark ({} samples)...", TEST_SAMPLES);
     let mut samples = Vec::with_capacity(TEST_SAMPLES);
-    let interval = Duration::from_micros(1_000_000 / FREQUENCY);
+    let interval = Duration::from_micros(1_000_000 / freq());
 
     for _ in 0..TEST_SAMPLES {
         let start = Instant::now();
@@ -341,7 +388,7 @@ async fn bench_tokio_tcp() {
 
     // Start server in background task
     let server_task = tokio::spawn(async {
-        let listener = TcpListener::bind("127.0.0.1:7449").await.unwrap();
+        let listener = TcpListener::bind(format!("127.0.0.1:{}", zenoh_port() + 4)).await.unwrap();
         let (mut socket, _) = listener.accept().await.unwrap();
         let mut buf = vec![0u8; PAYLOAD_SIZE];
         loop {
@@ -358,12 +405,12 @@ async fn bench_tokio_tcp() {
 
     sleep(Duration::from_millis(100)).await;
 
-    let mut stream = TcpStream::connect("127.0.0.1:7449").await.unwrap();
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", zenoh_port() + 4)).await.unwrap();
     let payload = vec![42u8; PAYLOAD_SIZE];
     let mut buf = vec![0u8; PAYLOAD_SIZE];
 
     println!("=== Pure Tokio TCP Benchmark (single-process) ===");
-    println!("Payload: {} bytes, Frequency: {} Hz", PAYLOAD_SIZE, FREQUENCY);
+    println!("Payload: {} bytes, Frequency: {} Hz", PAYLOAD_SIZE, freq());
 
     println!("Warming up ({} samples)...", WARMUP_SAMPLES);
     for _ in 0..WARMUP_SAMPLES {
@@ -373,7 +420,7 @@ async fn bench_tokio_tcp() {
 
     println!("Running benchmark ({} samples)...", TEST_SAMPLES);
     let mut samples = Vec::with_capacity(TEST_SAMPLES);
-    let interval = Duration::from_micros(1_000_000 / FREQUENCY);
+    let interval = Duration::from_micros(1_000_000 / freq());
 
     for _ in 0..TEST_SAMPLES {
         let start = Instant::now();
@@ -394,7 +441,7 @@ async fn bench_zenoh_callback() {
     use zenoh::{bytes::ZBytes, qos::CongestionControl, Config};
 
     println!("=== Zenoh Callback+Spawn Benchmark (single-process) ===");
-    println!("Payload: {} bytes, Frequency: {} Hz", PAYLOAD_SIZE, FREQUENCY);
+    println!("Payload: {} bytes, Frequency: {} Hz", PAYLOAD_SIZE, freq());
 
     let session = zenoh::open(Config::default()).await.unwrap();
 
@@ -442,7 +489,7 @@ async fn bench_zenoh_callback() {
 
     println!("Running benchmark ({} samples)...", TEST_SAMPLES);
     let mut samples = Vec::with_capacity(TEST_SAMPLES);
-    let interval = Duration::from_micros(1_000_000 / FREQUENCY);
+    let interval = Duration::from_micros(1_000_000 / freq());
 
     for _ in 0..TEST_SAMPLES {
         let start = Instant::now();
@@ -461,7 +508,7 @@ async fn bench_zenoh_loop() {
     use zenoh::{bytes::ZBytes, qos::CongestionControl, Config};
 
     println!("=== Zenoh Async Loop Benchmark (single-process) ===");
-    println!("Payload: {} bytes, Frequency: {} Hz", PAYLOAD_SIZE, FREQUENCY);
+    println!("Payload: {} bytes, Frequency: {} Hz", PAYLOAD_SIZE, freq());
 
     let session = zenoh::open(Config::default()).await.unwrap();
 
@@ -509,7 +556,7 @@ async fn bench_zenoh_loop() {
 
     println!("Running benchmark ({} samples)...", TEST_SAMPLES);
     let mut samples = Vec::with_capacity(TEST_SAMPLES);
-    let interval = Duration::from_micros(1_000_000 / FREQUENCY);
+    let interval = Duration::from_micros(1_000_000 / freq());
 
     for _ in 0..TEST_SAMPLES {
         let start = Instant::now();
@@ -530,6 +577,16 @@ async fn bench_zenoh_loop() {
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
+    // Optional second arg: frequency in Hz (default 200)
+    if let Some(f) = args.get(2) {
+        let hz: u64 = f.parse().expect("frequency must be a number");
+        let _ = FREQUENCY.set(hz);
+    }
+    // Optional third arg: base zenoh port (default 7448; loop uses base+2)
+    if let Some(p) = args.get(3) {
+        let port: u16 = p.parse().expect("port must be a number");
+        let _ = ZENOH_PORT.set(port);
+    }
     if args.len() < 2 {
         eprintln!("Usage: {} <mode>", args[0]);
         eprintln!("Modes (single-process, recommended):");
