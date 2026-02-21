@@ -72,7 +72,17 @@ impl SyncGroup {
     #[zenoh_macros::pub_visibility_if_internal]
     pub(crate) fn wait(&self) {
         let s = self.semaphore.clone();
-        let _p = ZRuntime::Application.block_in_place(s.acquire_many(Self::max_permits()));
+<<<<<<< HEAD
+        let acquire = s.acquire_many(Self::max_permits());
+        // Use block_in_place when inside a tokio multi-thread runtime (cooperates correctly),
+        // otherwise create a minimal runtime to drive the future (e.g. plain #[test] threads).
+        let _p = match tokio::runtime::Handle::try_current() {
+            Ok(handle) => tokio::task::block_in_place(|| handle.block_on(acquire)),
+            Err(_) => tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("failed to build tokio runtime for SyncGroup::wait")
+                .block_on(acquire),
+        };
         self.close();
     }
 

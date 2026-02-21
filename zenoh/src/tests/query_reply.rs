@@ -98,6 +98,8 @@ async fn test_reply_preserves_optimized_ke() {
     let ke = "test/reply_declared_ke";
     let declared_ke = ztimeout!(session.declare_keyexpr(ke)).unwrap();
     ztimeout!(query.reply(declared_ke, "payload")).unwrap();
+    // reply() spawns send_response as a separate task; give it time to run.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     let mut we = primitives.wire_expr().unwrap();
     assert!(we.suffix.is_empty());
@@ -105,6 +107,7 @@ async fn test_reply_preserves_optimized_ke() {
     assert!(we.mapping == Mapping::Sender);
 
     ztimeout!(query.reply(ke, "payload")).unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     we = primitives.wire_expr().unwrap();
     assert_eq!(&we.suffix, &ke);
     assert!(we.scope == 0);

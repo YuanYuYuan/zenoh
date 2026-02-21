@@ -545,6 +545,7 @@ impl Gossip {
             self.graph.remove_node(idx);
         }
 
+
         vec![]
     }
 }

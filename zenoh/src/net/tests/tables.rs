@@ -74,13 +74,13 @@ async fn base_test() {
         &mut face.upgrade().unwrap(),
         1,
         &"one/two/three".into(),
-    );
+    ).await;
     register_expr(
         &tables,
         &mut face.upgrade().unwrap(),
         2,
         &"one/deux/trois".into(),
-    );
+    ).await;
 
     let sub_info = SubscriberInfo;
 
@@ -712,7 +712,7 @@ async fn test_response_wireexpr() {
         &mut face0.upgrade().unwrap(),
         11,
         &"test/queryable/reply".into(),
-    );
+    ).await;
 
     Primitives::send_declare(
         primitives0.as_ref(),
@@ -734,7 +734,7 @@ async fn test_response_wireexpr() {
         &mut face1.upgrade().unwrap(),
         12,
         &"test/queryable".into(),
-    );
+    ).await;
 
     Primitives::send_declare(
         primitives1.as_ref(),
@@ -748,7 +748,7 @@ async fn test_response_wireexpr() {
                 wire_expr: "test/queryable".into(),
             }),
         },
-    );
+    ).await;
 
     declare_queryable(
         tables.hat_code.as_ref(),
@@ -782,7 +782,7 @@ async fn test_response_wireexpr() {
             ext_budget: None,
             ext_timeout: None,
         },
-    );
+    ).await;
 
     route_send_response(
         &tables,
@@ -803,7 +803,7 @@ async fn test_response_wireexpr() {
             ext_tstamp: None,
             ext_respid: None,
         },
-    );
+    ).await;
     assert_eq!(
         primitives1.get_last_name().unwrap(),
         "test/queryable/reply/1"
@@ -825,7 +825,7 @@ async fn test_response_wireexpr() {
             ext_nodeid: ext::NodeIdType::DEFAULT,
             body: DeclareBody::UndeclareKeyExpr(UndeclareKeyExpr { id: 12 }),
         },
-    );
+    ).await;
 
     route_send_response(
         &tables,
@@ -846,7 +846,7 @@ async fn test_response_wireexpr() {
             ext_tstamp: None,
             ext_respid: None,
         },
-    );
+    ).await;
     assert_eq!(
         primitives1.get_last_name().unwrap(),
         "test/queryable/reply/1"
@@ -870,7 +870,7 @@ async fn client_test() {
         &mut face0.upgrade().unwrap(),
         11,
         &"test/client".into(),
-    );
+    ).await;
     Primitives::send_declare(
         primitives0.as_ref(),
         Declare {
@@ -883,7 +883,7 @@ async fn client_test() {
                 wire_expr: "test/client".into(),
             }),
         },
-    );
+    ).await;
     let mut declares = vec![];
     declare_subscription(
         tables.hat_code.as_ref(),
@@ -906,7 +906,7 @@ async fn client_test() {
         &mut face0.upgrade().unwrap(),
         12,
         &WireExpr::from(11).with_suffix("/z1_pub1"),
-    );
+    ).await;
     Primitives::send_declare(
         primitives0.as_ref(),
         Declare {
@@ -919,7 +919,7 @@ async fn client_test() {
                 wire_expr: WireExpr::from(11).with_suffix("/z1_pub1"),
             }),
         },
-    );
+    ).await;
 
     let primitives1 = Arc::new(ClientPrimitives::new());
     let face1 = Arc::downgrade(&router.new_primitives(primitives1.clone()).state);
@@ -928,7 +928,7 @@ async fn client_test() {
         &mut face1.upgrade().unwrap(),
         21,
         &"test/client".into(),
-    );
+    ).await;
     Primitives::send_declare(
         primitives1.as_ref(),
         Declare {
@@ -941,7 +941,7 @@ async fn client_test() {
                 wire_expr: "test/client".into(),
             }),
         },
-    );
+    ).await;
     let mut declares = vec![];
     declare_subscription(
         tables.hat_code.as_ref(),
@@ -964,7 +964,7 @@ async fn client_test() {
         &mut face1.upgrade().unwrap(),
         22,
         &WireExpr::from(21).with_suffix("/z2_pub1"),
-    );
+    ).await;
     Primitives::send_declare(
         primitives1.as_ref(),
         Declare {
@@ -977,7 +977,7 @@ async fn client_test() {
                 wire_expr: WireExpr::from(21).with_suffix("/z2_pub1"),
             }),
         },
-    );
+    ).await;
 
     let primitives2 = Arc::new(ClientPrimitives::new());
     let face2 = Arc::downgrade(&router.new_primitives(primitives2.clone()).state);
@@ -986,7 +986,7 @@ async fn client_test() {
         &mut face2.upgrade().unwrap(),
         31,
         &"test/client".into(),
-    );
+    ).await;
     Primitives::send_declare(
         primitives2.as_ref(),
         Declare {
@@ -999,7 +999,7 @@ async fn client_test() {
                 wire_expr: "test/client".into(),
             }),
         },
-    );
+    ).await;
     let mut declares = vec![];
     declare_subscription(
         tables.hat_code.as_ref(),
@@ -1055,7 +1055,7 @@ async fn client_test() {
     primitives0.clear_data();
     primitives1.clear_data();
     primitives2.clear_data();
-    route_dummy_data(face0.clone(), WireExpr::from(11).with_suffix("/z1_wr2"));
+    route_dummy_data(face0.clone(), WireExpr::from(11).with_suffix("/z1_wr2")).await;
 
     // functional check
     assert!(primitives1.get_last_name().is_some());
@@ -1072,7 +1072,7 @@ async fn client_test() {
     primitives0.clear_data();
     primitives1.clear_data();
     primitives2.clear_data();
-    route_dummy_data(face1.clone(), "test/client/**".into());
+    route_dummy_data(face1.clone(), "test/client/**".into()).await;
 
     // functional check
     assert!(primitives0.get_last_name().is_some());
@@ -1089,7 +1089,7 @@ async fn client_test() {
     primitives0.clear_data();
     primitives1.clear_data();
     primitives2.clear_data();
-    route_dummy_data(face0.clone(), 12.into());
+    route_dummy_data(face0.clone(), 12.into()).await;
 
     // functional check
     assert!(primitives1.get_last_name().is_some());
@@ -1106,7 +1106,7 @@ async fn client_test() {
     primitives0.clear_data();
     primitives1.clear_data();
     primitives2.clear_data();
-    route_dummy_data(face1.clone(), 22.into());
+    route_dummy_data(face1.clone(), 22.into()).await;
 
     // functional check
     assert!(primitives0.get_last_name().is_some());

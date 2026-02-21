@@ -694,7 +694,11 @@ impl Network {
                 }
             }
             if !out.is_empty() {
-                self.send_on_link(out, &link.transport);
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(
+                    self.send_on_link(out, &link.transport)
+                    )
+                });
             }
         }
     }
@@ -961,7 +965,11 @@ impl Network {
                     )
                 })
                 .collect();
-        self.send_on_link(idxs, &transport);
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(
+            self.send_on_link(idxs, &transport)
+            )
+        });
         free_index
     }
 

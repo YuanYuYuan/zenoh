@@ -182,13 +182,22 @@ impl TransportPeerEventHandler for DeMux {
                 let msg = m.clone();
                 tokio::spawn(async move { face.send_push(msg, reliability).await });
             }
+            // Control-plane messages (Declare, Interest) must be processed in order:
+            // spawning each as a separate task creates races where DeclareSubscriber
+            // executes before DeclareKeyExpr for the same scope. Use block_in_place
+            // so handle_message blocks until the declaration is registered, preserving
+            // wire ordering without blocking a tokio worker thread.
             NetworkBodyMut::Declare(m) => {
                 let msg = m.clone();
-                tokio::spawn(async move { face.send_declare(msg).await });
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(face.send_declare(msg))
+                });
             }
             NetworkBodyMut::Interest(m) => {
                 let msg = m.clone();
-                tokio::spawn(async move { face.send_interest(msg).await });
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(face.send_interest(msg))
+                });
             }
             NetworkBodyMut::Request(m) => {
                 let msg = m.clone();

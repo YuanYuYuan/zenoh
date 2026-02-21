@@ -434,7 +434,8 @@ impl Timed for QueryCleanup {
                     ext_tstamp: None,
                     ext_respid,
                 },
-            );
+            )
+            .await;
             let queries_lock = self.tables.queries_lock.write().await;
             if let Some(query) = get_mut_unchecked(&mut face)
                 .pending_queries

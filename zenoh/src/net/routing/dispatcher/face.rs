@@ -704,19 +704,19 @@ impl Primitives for Face {
     async fn send_request(&self, mut msg: Request) -> bool {
         match msg.payload {
             RequestBody::Query(_) => {
-                route_query(&self.tables, &self.state, &mut msg);
+                route_query(&self.tables, &self.state, &mut msg).await;
             }
         }
         true
     }
 
     async fn send_response(&self, mut msg: Response) -> bool {
-        route_send_response(&self.tables, &mut self.state.clone(), &mut msg);
+        route_send_response(&self.tables, &mut self.state.clone(), &mut msg).await;
         true
     }
 
     async fn send_response_final(&self, msg: ResponseFinal) -> bool {
-        route_send_response_final(&self.tables, &mut self.state.clone(), msg.rid);
+        route_send_response_final(&self.tables, &mut self.state.clone(), msg.rid).await;
         true
     }
 
@@ -724,7 +724,7 @@ impl Primitives for Face {
         tracing::debug!("{} Close", self.state);
         let mut state = self.state.clone();
         state.task_controller.terminate_all(Duration::from_secs(10));
-        finalize_pending_queries(&self.tables, &mut state);
+        finalize_pending_queries(&self.tables, &mut state).await;
         let mut declares = vec![];
         let ctrl_lock = self.tables.ctrl_lock.lock().await;
         finalize_pending_interests(&self.tables, &mut state, &mut |p, m| {

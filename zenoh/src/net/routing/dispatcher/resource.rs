@@ -716,21 +716,28 @@ impl Resource {
                         .insert(expr_id, nonwild_prefix.clone());
                     let primitives = face.primitives.clone();
                     let expr_str = nonwild_prefix.expr().to_string();
-                    tokio::spawn(async move {
-                        let ctx = RoutingContext::with_expr(
-                            Declare {
-                                interest_id: None,
-                                ext_qos: ext::QoSType::DECLARE,
-                                ext_tstamp: None,
-                                ext_nodeid: ext::NodeIdType::DEFAULT,
-                                body: DeclareBody::DeclareKeyExpr(DeclareKeyExpr {
-                                    id: expr_id,
-                                    wire_expr: expr_str.clone().into(),
-                                }),
-                            },
-                            expr_str,
-                        );
-                        primitives.send_declare(ctx.msg).await;
+                    // DeclareKeyExpr MUST arrive at the remote face before the
+                    // DeclareSubscriber/DeclareQueryable that uses this scope.
+                    // Using tokio::spawn races against the following declare send.
+                    // block_in_place drives the send synchronously so the remote
+                    // face registers the scope before processing the declaration.
+                    tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(async {
+                            let ctx = RoutingContext::with_expr(
+                                Declare {
+                                    interest_id: None,
+                                    ext_qos: ext::QoSType::DECLARE,
+                                    ext_tstamp: None,
+                                    ext_nodeid: ext::NodeIdType::DEFAULT,
+                                    body: DeclareBody::DeclareKeyExpr(DeclareKeyExpr {
+                                        id: expr_id,
+                                        wire_expr: expr_str.clone().into(),
+                                    }),
+                                },
+                                expr_str,
+                            );
+                            primitives.send_declare(ctx.msg).await;
+                        })
                     });
                     face.update_interceptors_caches(&mut nonwild_prefix);
                     WireExpr {

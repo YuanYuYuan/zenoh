@@ -85,6 +85,7 @@ async fn time_open(
         .set_enabled(!lowlatency)
         .unwrap();
 
+
     let start = Instant::now();
     let router = ztimeout_expected!(test_context.open_listener_with_cfg(router_config));
     let listener_endpoint = get_locators_from_session(&router)
@@ -116,6 +117,7 @@ async fn time_open(
         .qos
         .set_enabled(!lowlatency)
         .unwrap();
+
 
     /* [1] */
     // Open a transport from the app to the router
