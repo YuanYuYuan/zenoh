@@ -580,7 +580,11 @@ impl Query {
         let wire_expr = self.inner.primitives.keyexpr_to_wire(&sample.key_expr);
         let zid = self.inner.zid;
         let eid = self.eid;
-        tokio::spawn(async move {
+        // Drive the response to completion before returning. This ensures the response
+        // is routed (and registered in pending_queries) before QueryInner::drop() can
+        // spawn the ResponseFinal, which would otherwise create a race condition where
+        // ResponseFinal removes the pending query before the Response is processed.
+        let response = async move {
             primitives.send_response(Response {
                 rid: qid,
                 wire_expr,
@@ -613,7 +617,14 @@ impl Query {
                     eid,
                 }),
             }).await;
-        });
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => tokio::task::block_in_place(|| handle.block_on(response)),
+            Err(_) => tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("failed to build runtime for reply")
+                .block_on(response),
+        }
         Ok(())
     }
 }

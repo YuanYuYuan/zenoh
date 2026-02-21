@@ -72,7 +72,6 @@ impl SyncGroup {
     #[zenoh_macros::pub_visibility_if_internal]
     pub(crate) fn wait(&self) {
         let s = self.semaphore.clone();
-<<<<<<< HEAD
         let acquire = s.acquire_many(Self::max_permits());
         // Use block_in_place when inside a tokio multi-thread runtime (cooperates correctly),
         // otherwise create a minimal runtime to drive the future (e.g. plain #[test] threads).

@@ -203,13 +203,21 @@ impl TransportPeerEventHandler for DeMux {
                 let msg = m.clone();
                 tokio::spawn(async move { face.send_request(msg).await });
             }
+            // Response and ResponseFinal must be processed in wire order:
+            // ResponseFinal removes the pending query, so if it ran before Response
+            // the routing would warn "Query not found". Use block_in_place to
+            // serialize them, same as Declare/Interest.
             NetworkBodyMut::Response(m) => {
                 let msg = m.clone();
-                tokio::spawn(async move { face.send_response(msg).await });
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(face.send_response(msg))
+                });
             }
             NetworkBodyMut::ResponseFinal(m) => {
                 let msg = m.clone();
-                tokio::spawn(async move { face.send_response_final(msg).await });
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(face.send_response_final(msg))
+                });
             }
             NetworkBodyMut::OAM(m) => {
                 if let Some(transport) = self.transport.as_ref() {

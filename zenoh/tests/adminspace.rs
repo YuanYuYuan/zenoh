@@ -50,6 +50,8 @@ async fn test_adminspace_wonly() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_adminspace_read() {
     const TIMEOUT: Duration = Duration::from_secs(60);
+    const ROUTER_ENDPOINT: &str = "tcp/localhost:31000";
+    const PEER_ENDPOINT: &str = "tcp/localhost:31002";
 
     zenoh_util::init_log_from_env_or("error");
 
@@ -59,10 +61,7 @@ async fn test_adminspace_read() {
         c.set_mode(Some(WhatAmI::Router)).unwrap();
         c.listen
             .endpoints
-            .set(vec![
-                "tcp/127.0.0.1:0".parse::<EndPoint>().unwrap(),
-                "udp/224.0.0.224:0".parse::<EndPoint>().unwrap(),
-            ])
+            .set(vec![ROUTER_ENDPOINT.parse::<EndPoint>().unwrap()])
             .unwrap();
         c.scouting.multicast.set_enabled(Some(false)).unwrap();
         c.adminspace.set_enabled(true).unwrap();
@@ -86,26 +85,13 @@ async fn test_adminspace_read() {
     };
     let zid = router.zid();
 
-    // Resolve the actual TCP endpoint assigned by the OS
-    let router_locators = get_locators_from_session(&router).await;
-    let tcp_locator = router_locators
-        .iter()
-        .find(|ep| ep.to_string().starts_with("tcp/"))
-        .expect("Expected a TCP listener endpoint from router")
-        .clone();
-    let udp_locator = router_locators
-        .iter()
-        .find(|ep| ep.to_string().starts_with("udp/"))
-        .expect("Expected a UDP listener endpoint from router")
-        .clone();
-
     let router2 = {
         let mut c = zenoh_config::Config::default();
         c.set_mode(Some(WhatAmI::Router)).unwrap();
         c.listen.endpoints.set(vec![]).unwrap();
         c.connect
             .endpoints
-            .set(vec![tcp_locator.clone().into()])
+            .set(vec![ROUTER_ENDPOINT.parse::<EndPoint>().unwrap()])
             .unwrap();
         ztimeout!(zenoh::open(c)).unwrap()
     };
@@ -113,7 +99,10 @@ async fn test_adminspace_read() {
     let peer = {
         let mut c = zenoh_config::Config::default();
         c.set_mode(Some(WhatAmI::Peer)).unwrap();
-        c.listen.endpoints.set(vec![udp_locator.clone()]).unwrap();
+        c.listen
+            .endpoints
+            .set(vec![PEER_ENDPOINT.parse::<EndPoint>().unwrap()])
+            .unwrap();
         c.scouting.multicast.set_enabled(Some(false)).unwrap();
         ztimeout!(zenoh::open(c)).unwrap()
     };
