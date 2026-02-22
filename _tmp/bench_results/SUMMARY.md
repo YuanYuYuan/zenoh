@@ -225,3 +225,128 @@ at call site) would avoid this overhead, but requires exposing `TransportLinkUni
 
 **Decision**: Reverted. Keep mpsc queue (P50=27µs, P99=43µs). The P99 improvement vs main
 is retained; the P50 gap remains as accepted technical debt.
+
+---
+
+## Per-Connection current_thread Runtime Experiment (2026-02-22, REVERTED)
+
+### Goal
+
+Eliminate the 2µs P50 gap by moving the RX task + DeMux consumer task onto a dedicated
+`tokio::runtime::Builder::new_current_thread()` runtime per connection. Hypothesis: both
+tasks run cooperatively on the same OS thread, eliminating cross-thread wakeups.
+
+### Approach
+
+- `start_rx()` creates a `current_thread` runtime per connection, drives it on a new OS thread.
+- `rx_runtime_ready()` hook on `TransportPeerEventHandler` allows `DeMux` to spawn its consumer
+  task onto the per-connection runtime via `tokio::spawn` from within that runtime's context.
+- Control messages (Declare/Interest/etc.) are redirected to `ZRuntime::Net.deref().spawn()`
+  (Handle::spawn) since they call `block_in_place` which panics on `current_thread` runtimes.
+
+### Results (parallel comparison, 1000 samples)
+
+| Metric | main  | true-async(per-conn rt) | true-async(mpsc) |
+|--------|------:|------------------------:|-----------------:|
+| P50    |  29µs |                **36µs** |            32µs  |
+| P95    |  35µs |                  45µs   |            39µs  |
+| P99    |  41µs |                  52µs   |            46µs  |
+
+### Root Cause of Regression
+
+The extra OS thread per connection adds scheduling pressure and cache overhead.
+With `current_thread`:
+1. The per-connection thread competes with all other threads for CPU time
+2. Tasks can't migrate to idle workers (no work-stealing) → worse throughput under load
+3. The OS scheduler treats it as another runnable thread — more context switches
+4. Control messages hop to `ZRuntime::Net` (extra task boundary for Declare/Interest)
+
+In contrast, with `ZRuntime::RX` (multi-thread), the RX task and consumer task both land
+on the shared pool — tokio's scheduler places them on the same worker when possible,
+and the consumer task is already "near" the RX task in the work queue.
+
+### Lessons Learned
+
+- tokio's multi-thread work-stealing scheduler is better at locality than a separate OS thread
+- The cross-thread wakeup cost (~2µs) is NOT the bottleneck — extra OS threads cost MORE
+- `block_in_place` is widely used in gossip/routing and can't be called from current_thread
+- `ZRuntime::Net.deref()` gives `Handle::spawn` which correctly targets the shared runtime
+  even when called from a different tokio runtime context (unlike `tokio::spawn()`)
+
+### Retained improvements
+
+- `rx_runtime_ready()` no-op hook on `TransportPeerEventHandler` (future extensibility)
+- `demux.rs` and `link.rs` now use `ZRuntime::Net.deref().spawn()` for OAM, `closed()`,
+  and blocked-interceptor error paths — defensive correctness for future single-thread callers
+- `link.rs` del_link error path cleaned up (removed stale WARN comments, uses ZRuntime::Net)
+
+**Decision**: Reverted per-connection runtime. Keep mpsc queue. P50 gap remains (~3µs).
+
+---
+
+## Generic-Closure RX Driver Experiment (2026-02-22, REVERTED)
+
+### Goal
+
+Eliminate the 2µs P50 gap by routing messages **inline on the RX task** using a monomorphized
+`F: FnMut(NetworkMessage) -> Fut` closure — no `Box::pin`, no task boundary.
+
+```
+Hypothesis: one task (recv + inline routing) < two tasks (recv → mpsc → consume)
+```
+
+### Approach
+
+- Added `read_messages_async<F,Fut>()` to `rx.rs` — generic over an async closure
+- Added `UnicastBatchProcessor` public wrapper exposing `process_batch<F,Fut>()`
+- Added `start_rx_driver` hook on `TransportPeerEventHandler` (returns `None` to take
+  ownership of the RX loop, `Some(rx)` to fall back to old task)
+- `DeMux::route_inline` routes an owned `NetworkMessage` directly via face methods
+- `unicast_rx_driver` free async function spawned on `ZRuntime::RX` combines socket recv
+  + inline routing in one task
+- Per-message closure: `|msg| { let d = demux.clone(); async move { d.route_inline(msg).await } }`
+  (one `Arc::clone()` per decoded message)
+
+### Results (parallel comparison, 1000 samples, 64B payload, back-to-back)
+
+| Metric | main   | true-async (driver) | true-async (mpsc) |
+|--------|-------:|--------------------:|------------------:|
+| Min    |  22µs  |               23µs  |             23µs  |
+| P25    |  23µs  |               26µs  |             26µs  |
+| P50    |  24µs  |           **27µs**  |         **27µs**  |
+| P75    |  26µs  |               29µs  |             29µs  |
+| P95    |  35µs  |               36µs  |             34µs  |
+| P99    |  46µs  |               47µs  |             43µs  |
+| Max    | 778µs  |               63µs  |            250µs  |
+
+### Conclusion: REVERTED — NEUTRAL (no improvement over mpsc queue)
+
+The generic-closure driver gives the **identical P50 as the mpsc queue** (both 27µs vs main 24µs).
+Inlining routing on the RX task does not close the gap.
+
+**Root cause confirmed**: The ~3µs P50 delta is from `async_lock::RwLock` (routing tables) and
+`async_channel` (pipeline) replacing `std::sync::RwLock` + ring buffer used in main. This cost
+is incurred on every message regardless of whether routing is inline or via mpsc handoff.
+
+The per-message `Arc::clone()` in the closure is ~2ns — negligible. The task wakeup overhead
+(~1µs estimated) that the driver was designed to eliminate is also negligible relative to the
+`async_lock` overhead. Tokio's work-stealing scheduler places RX task and consumer task on the
+same worker most of the time, so the effective cross-task penalty is small.
+
+**Summary of all approaches tried to close the ~3µs P50 gap**:
+
+| Approach | P50 (true-async) | vs main | vs mpsc | Status |
+|----------|:----------------:|:-------:|:-------:|--------|
+| mpsc queue (current) | 27µs | +12.5% | — | ✅ kept |
+| `Pin<Box<dyn Future>>` inline | 32µs | +33% | worse | ❌ reverted |
+| `block_in_place` for ordering | 28µs | +17% | slightly worse | ❌ reverted |
+| `current_thread` runtime per-conn | 36µs | +50% | much worse | ❌ reverted |
+| Generic-closure driver (monomorphized) | 27µs | +12.5% | **same** | ❌ reverted |
+
+**The gap cannot be closed by routing-path restructuring.** It requires either:
+1. Replacing `async_lock::RwLock` with `std::sync::RwLock` + blocking strategy (reverts Phase 1–2), or
+2. Accepting the ~3µs trade-off in exchange for non-blocking under backpressure (P99 is -8.5% vs main).
+
+**Decision**: Accept the ~3µs P50 delta. The P99 improvement (-8.5%, 43µs vs 47µs) is the
+meaningful correctness and scalability benefit of the true-async branch. No further attempts
+to close the P50 gap on this branch.
