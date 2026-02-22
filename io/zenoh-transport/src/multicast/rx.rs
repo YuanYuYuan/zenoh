@@ -36,10 +36,10 @@ use crate::common::{
 /*************************************/
 //noinspection ALL
 impl TransportMulticastInner {
-    fn trigger_callback(
+    async fn trigger_callback(
         &self,
         #[allow(unused_mut)] // shared-memory feature requires mut
-        mut msg: NetworkMessageMut,
+        mut msg: NetworkMessageMut<'_>,
         peer: &TransportMulticastPeer,
     ) -> ZResult<()> {
         #[cfg(feature = "stats")]
@@ -58,7 +58,7 @@ impl TransportMulticastInner {
                 }
             }
         }
-        peer.handler.handle_message(msg)
+        peer.handler.handle_message_async(msg).await
     }
 
     pub(super) fn handle_join_from_peer(
@@ -146,9 +146,9 @@ impl TransportMulticastInner {
         self.new_peer(locator, join)
     }
 
-    fn handle_frame(
+    async fn handle_frame(
         &self,
-        frame: FrameReader<ZSlice>,
+        frame: FrameReader<'_, ZSlice>,
         peer: &TransportMulticastPeer,
     ) -> ZResult<()> {
         let priority = frame.ext_qos.priority();
@@ -165,23 +165,30 @@ impl TransportMulticastInner {
             );
         };
 
-        let mut guard = match frame.reliability {
-            Reliability::Reliable => zlock!(c.reliable),
-            Reliability::BestEffort => zlock!(c.best_effort),
+        let sn_ok = {
+            let mut guard = match frame.reliability {
+                Reliability::Reliable => zlock!(c.reliable),
+                Reliability::BestEffort => zlock!(c.best_effort),
+            };
+            self.verify_sn("Frame", frame.sn, &mut guard)?
         };
 
-        if !self.verify_sn("Frame", frame.sn, &mut guard)? {
-            // Drop invalid message and continue
+        if !sn_ok {
             return Ok(());
         }
+
         for mut msg in frame {
-            self.trigger_callback(msg.as_mut(), peer)?;
+            self.trigger_callback(msg.as_mut(), peer).await?;
         }
 
         Ok(())
     }
 
-    fn handle_fragment(&self, fragment: Fragment, peer: &TransportMulticastPeer) -> ZResult<()> {
+    async fn handle_fragment(
+        &self,
+        fragment: Fragment,
+        peer: &TransportMulticastPeer,
+    ) -> ZResult<()> {
         let Fragment {
             reliability,
             more,
@@ -206,50 +213,50 @@ impl TransportMulticastInner {
             );
         };
 
-        let mut guard = match reliability {
-            Reliability::Reliable => zlock!(c.reliable),
-            Reliability::BestEffort => zlock!(c.best_effort),
+        let defragmented = {
+            let mut guard = match reliability {
+                Reliability::Reliable => zlock!(c.reliable),
+                Reliability::BestEffort => zlock!(c.best_effort),
+            };
+
+            if !self.verify_sn("Fragment", sn, &mut guard)? {
+                return Ok(());
+            }
+            if peer.patch.has_fragmentation_markers() {
+                if ext_first.is_some() {
+                    guard.defrag.clear();
+                } else if guard.defrag.is_empty() {
+                    tracing::trace!(
+                        "Transport: {}. First fragment received without start marker.",
+                        self.manager.config.zid,
+                    );
+                    return Ok(());
+                }
+                if ext_drop.is_some() {
+                    guard.defrag.clear();
+                    return Ok(());
+                }
+            }
+            if guard.defrag.is_empty() {
+                let _ = guard.defrag.sync(sn);
+            }
+            if let Err(e) = guard.defrag.push(sn, payload) {
+                tracing::trace!("{}", e);
+                return Ok(());
+            }
+            if !more { guard.defrag.defragment() } else { None }
+            // guard dropped here
         };
 
-        if !self.verify_sn("Fragment", sn, &mut guard)? {
-            // Drop invalid message and continue
-            return Ok(());
-        }
-        if peer.patch.has_fragmentation_markers() {
-            if ext_first.is_some() {
-                guard.defrag.clear();
-            } else if guard.defrag.is_empty() {
-                tracing::trace!(
-                    "Transport: {}. First fragment received without start marker.",
-                    self.manager.config.zid,
-                );
-                return Ok(());
-            }
-            if ext_drop.is_some() {
-                guard.defrag.clear();
-                return Ok(());
-            }
-        }
-        if guard.defrag.is_empty() {
-            let _ = guard.defrag.sync(sn);
-        }
-        if let Err(e) = guard.defrag.push(sn, payload) {
-            // Defrag errors don't close transport
-            tracing::trace!("{}", e);
-            return Ok(());
-        }
-        if !more {
-            // When shared-memory feature is disabled, msg does not need to be mutable
-            if let Some(mut msg) = guard.defrag.defragment() {
-                return self.trigger_callback(msg.as_mut(), peer);
-            } else {
-                tracing::trace!(
-                    "Transport: {}. Peer: {}. Priority: {:?}. Defragmentation error.",
-                    self.manager.config.zid,
-                    peer.zid,
-                    priority
-                );
-            }
+        if let Some(mut msg) = defragmented {
+            return self.trigger_callback(msg.as_mut(), peer).await;
+        } else if !more {
+            tracing::trace!(
+                "Transport: {}. Peer: {}. Priority: {:?}. Defragmentation error.",
+                self.manager.config.zid,
+                peer.zid,
+                priority
+            );
         }
 
         Ok(())
@@ -280,7 +287,7 @@ impl TransportMulticastInner {
         Ok(true)
     }
 
-    pub(super) fn read_messages(
+    pub(super) async fn read_messages(
         &self,
         mut batch: RBatch,
         locator: Locator,
@@ -294,9 +301,11 @@ impl TransportMulticastInner {
                 {
                     stats.inc_transport_message(zenoh_stats::Rx, 1);
                 }
-                if let Some(peer) = zread!(self.peers).get(&locator) {
+                // Clone the peer Arc to release the read lock before awaiting.
+                let peer = zread!(self.peers).get(&locator).cloned();
+                if let Some(peer) = peer {
                     peer.set_active();
-                    self.handle_frame(frame, peer)?;
+                    self.handle_frame(frame, &peer).await?;
                 }
                 continue;
             }
@@ -311,19 +320,19 @@ impl TransportMulticastInner {
                 stats.inc_transport_message(zenoh_stats::Rx, 1);
             }
 
-            let r_guard = zread!(self.peers);
-            match r_guard.get(&locator) {
+            // Clone peer Arc to release read lock before any await.
+            let peer = zread!(self.peers).get(&locator).cloned();
+            match peer {
                 Some(peer) => {
                     peer.set_active();
                     match msg.body {
                         TransportBody::Frame(_) => unreachable!(),
                         TransportBody::Fragment(fragment) => {
-                            self.handle_fragment(fragment, peer)?;
+                            self.handle_fragment(fragment, &peer).await?;
                         }
-                        TransportBody::Join(join) => self.handle_join_from_peer(join, peer)?,
+                        TransportBody::Join(join) => self.handle_join_from_peer(join, &peer)?,
                         TransportBody::KeepAlive(KeepAlive { .. }) => {}
                         TransportBody::Close(Close { reason, .. }) => {
-                            drop(r_guard);
                             self.del_peer(&locator, reason)?;
                         }
                         _ => {
@@ -336,7 +345,6 @@ impl TransportMulticastInner {
                     }
                 }
                 None => {
-                    drop(r_guard);
                     if let TransportBody::Join(join) = msg.body {
                         self.handle_join_from_unknown(join, &locator, batch_size)?;
                     }

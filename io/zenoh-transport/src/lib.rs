@@ -119,6 +119,19 @@ pub struct TransportPeer {
 
 pub trait TransportPeerEventHandler: Send + Sync {
     fn handle_message(&self, msg: NetworkMessageMut) -> ZResult<()>;
+
+    /// Async variant of `handle_message`.
+    ///
+    /// The default implementation calls the synchronous `handle_message` and wraps the result
+    /// in an immediately-ready future. Override this in handlers that can route asynchronously
+    /// (e.g. `DeMux`) to avoid spawning a separate consumer task.
+    fn handle_message_async<'a>(
+        &'a self,
+        msg: NetworkMessageMut<'a>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ZResult<()>> + Send + 'a>> {
+        Box::pin(std::future::ready(self.handle_message(msg)))
+    }
+
     fn new_link(&self, src: Link);
     fn del_link(&self, link: Link);
     fn closed(&self);

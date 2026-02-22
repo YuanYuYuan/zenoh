@@ -390,7 +390,7 @@ async fn rx_task_non_uring(
                     let header_bytes = if l.is_streamed { 2 } else { 0 };
                     stats.inc_bytes(zenoh_stats::Rx, header_bytes + batch.len() as u64);
                 }
-                transport.read_messages(batch, &l, #[cfg(feature = "stats")] &stats)?;
+                transport.read_messages_async(batch, &l, #[cfg(feature = "stats")] &stats).await?;
             }
 
             _ = token.cancelled() => break

@@ -1123,6 +1123,13 @@ impl TransportPeerEventHandler for RuntimeSession {
         self.main_handler.handle_message(msg)
     }
 
+    fn handle_message_async<'a>(
+        &'a self,
+        msg: NetworkMessageMut<'a>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ZResult<()>> + Send + 'a>> {
+        self.main_handler.handle_message_async(msg)
+    }
+
     fn new_link(&self, link: zenoh_link::Link) {
         let _span = self.runtime.state.span.enter();
         self.main_handler.new_link(link.clone());
@@ -1201,6 +1208,13 @@ pub(super) struct RuntimeMulticastSession {
 impl TransportPeerEventHandler for RuntimeMulticastSession {
     fn handle_message(&self, msg: NetworkMessageMut) -> ZResult<()> {
         self.main_handler.handle_message(msg)
+    }
+
+    fn handle_message_async<'a>(
+        &'a self,
+        msg: NetworkMessageMut<'a>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ZResult<()>> + Send + 'a>> {
+        self.main_handler.handle_message_async(msg)
     }
 
     fn new_link(&self, link: zenoh_link::Link) {

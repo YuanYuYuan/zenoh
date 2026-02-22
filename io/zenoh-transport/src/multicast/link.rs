@@ -569,7 +569,7 @@ async fn rx_task(
                     batch_size,
                     #[cfg(feature = "stats")]
                     &transport.link_stats,
-                )?;
+                ).await?;
             }
         }
     }
