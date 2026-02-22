@@ -123,6 +123,13 @@ pub trait TransportPeerEventHandler: Send + Sync {
     fn del_link(&self, link: Link);
     fn closed(&self);
     fn as_any(&self) -> &dyn Any;
+    /// Called once from within the per-connection RX runtime's async context,
+    /// just before the RX read loop starts.  Implementors that maintain a
+    /// consumer task (e.g. `DeMux`) can use this hook to spawn it from within
+    /// a specific runtime context if needed.
+    ///
+    /// The default implementation is a no-op (correct for sync handlers).
+    fn rx_runtime_ready(&self) {}
 }
 
 // Define an empty TransportCallback for the listener transport

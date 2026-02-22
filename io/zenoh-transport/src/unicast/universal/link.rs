@@ -169,8 +169,8 @@ impl TransportLinkUnicastUniversal {
         let token = self.token.clone();
         #[cfg(feature = "stats")]
         let stats = self.stats.clone();
+
         let task = async move {
-            // Start the consume task
             let res = rx_task(
                 &mut rx,
                 transport.clone(),
@@ -182,29 +182,18 @@ impl TransportLinkUnicastUniversal {
             )
             .await;
 
-            // TODO(yuyuan): improve this callback
             if let Err(e) = res {
                 tracing::debug!("RX task failed: {}", e);
-
                 // Spawn a task to avoid a deadlock waiting for this same task
                 // to finish in the close() joining its handle
-                // WARN: Must be spawned on RX
-
-                tokio::spawn(async move {
-                    transport
-                        .del_link(Link::new_unicast(&rx.link, priorities, reliability))
-                        .await
-                });
-
-                // // WARN: This ZRuntime blocks
-                // zenoh_runtime::ZRuntime::Net
-                //     .spawn(async move { transport.del_link((&rx.link).into()).await });
-
-                // // WARN: This cloud block
-                // transport.del_link((&rx.link).into()).await;
+                zenoh_runtime::ZRuntime::Net
+                    .spawn(async move {
+                        transport
+                            .del_link(Link::new_unicast(&rx.link, priorities, reliability))
+                            .await
+                    });
             }
         };
-        // WARN: If this is on ZRuntime::TX, a deadlock would occur.
         self.tracker.spawn_on(task, &zenoh_runtime::ZRuntime::RX);
     }
 
