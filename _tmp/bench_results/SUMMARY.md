@@ -350,3 +350,70 @@ same worker most of the time, so the effective cross-task penalty is small.
 **Decision**: Accept the ~3µs P50 delta. The P99 improvement (-8.5%, 43µs vs 47µs) is the
 meaningful correctness and scalability benefit of the true-async branch. No further attempts
 to close the P50 gap on this branch.
+
+---
+
+## io_uring Feature Benchmark (2026-02-23)
+
+### Test Configuration
+- Payload: 64 bytes
+- Samples: 1,000 (+ 5s warmup)
+- Mode: Back-to-back sequential ping-pong, two processes
+- Build: release with `--features uring` vs without
+- Run: head-to-head (uring pair and non-uring pair running simultaneously)
+
+### Results (head-to-head parallel, 2026-02-23)
+
+| Metric | main (prior solo) | true-async non-uring | true-async uring |
+|--------|:-----------------:|:--------------------:|:----------------:|
+| Min    | 23µs              | 28µs                 | 35µs             |
+| P25    | 24µs              | 33µs                 | 43µs             |
+| P50    | 25µs              | **36µs**             | **46µs**         |
+| P75    | 26µs              | 41µs                 | 50µs             |
+| P95    | 34µs              | 52µs                 | 62µs             |
+| P99    | 47µs              | 61µs                 | 90µs             |
+| Max    | —                 | 460µs                | 141µs            |
+
+*(main shown from prior solo run for reference; uring and non-uring ran simultaneously)*
+
+### Conclusion: io_uring is SLOWER for sequential small-message ping-pong
+
+**P50: uring=46µs vs non-uring=36µs — +28% regression.**
+
+#### Root cause: extra OS thread boundary on the hot path
+
+```
+Non-uring (all tokio):
+  epoll event → tokio RX task wakes (on shared worker pool)
+    → try_send → consumer task wakes (same pool, work-stealing locality)
+
+io_uring (cross-runtime):
+  io_uring CQE → dedicated uring reader thread wakes (non-tokio OS thread)
+    → ring_cb() → try_send → consumer task wakes on tokio
+    (cross-runtime mpsc wakeup: non-tokio → tokio)
+```
+
+The uring reader thread:
+1. Competes with tokio worker threads for CPU cores
+2. Causes a cross-runtime thread wakeup (slower than tokio-to-tokio wakeup)
+3. Provides no batching benefit in sequential mode (one message in flight at a time)
+4. Multishot recv has zero advantage when only one recv is submitted at a time
+
+#### When io_uring DOES help
+
+- **Large payloads** (fragmented messages): `PooledBuffer` eliminates the `Vec::from_iter`
+  allocation that profiling showed at 33.71% CPU. For 1MB+ messages, uring zero-copy
+  and pooled defrag can dramatically reduce per-message allocations.
+- **High-throughput concurrent scenarios**: Many messages in flight simultaneously —
+  CQE batching amortizes the fixed cost of polling the completion ring.
+- **Many simultaneous connections**: A single io_uring ring serves all connections,
+  reducing per-connection syscall overhead vs. one epoll fd per connection.
+
+#### Decision
+
+**io_uring is not beneficial for the latency benchmark** (sequential 64B ping-pong).
+The `uring` feature remains correctly gated behind `--features uring` (opt-in only).
+Default builds use the tokio epoll path, which has better latency for this workload.
+
+The PooledBuffer + bulk-memcpy optimizations (from `patch/io-uring/bulk-read`) are
+already merged and benefit large-payload throughput scenarios when uring is enabled.
