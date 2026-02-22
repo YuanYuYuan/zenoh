@@ -56,9 +56,7 @@ uring = ["zenoh-link/uring", "zenoh-uring"]
 [dependencies]
 arc-swap = { workspace = true }
 async-channel = { workspace = true }
-async-io = { workspace = true }
 async-lock = { workspace = true }
-async-std = { workspace = true }
 async-trait = { workspace = true }
 crossbeam-utils = { workspace = true }
 flume = { workspace = true }

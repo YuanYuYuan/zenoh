@@ -232,7 +232,7 @@ async fn tx_task(
 ) -> ZResult<()> {
     loop {
         tokio::select! {
-            res = async_std::future::timeout(keep_alive, pipeline.pull()) => {
+            res = tokio::time::timeout(keep_alive, pipeline.pull()) => {
                 match res {
                     Ok(Some((mut batch, priority))) => {
                         link.send_batch(&mut batch).await?;
@@ -274,7 +274,7 @@ async fn tx_task(
     // Drain the transmission pipeline and write remaining bytes on the wire
     let mut batches = pipeline.drain();
     for (mut b, _) in batches.drain(..) {
-        async_std::future::timeout(keep_alive, link.send_batch(&mut b))
+        tokio::time::timeout(keep_alive, link.send_batch(&mut b))
             .await
             .map_err(|_| zerror!("{}: flush failed after {} ms", link, keep_alive.as_millis()))??;
 
@@ -383,7 +383,7 @@ async fn rx_task_non_uring(
 
     loop {
         tokio::select! {
-            batch = async_std::future::timeout(lease, read(link, &pool)) => {
+            batch = tokio::time::timeout(lease, read(link, &pool)) => {
                 let batch = batch.map_err(|_| zerror!("{}: expired after {} milliseconds", link, lease.as_millis()))??;
                 #[cfg(feature = "stats")]
                 {

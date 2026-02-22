@@ -423,7 +423,7 @@ async fn tx_task(
         let target = last_join + join_interval;
         if now < target {
             let left = target - now;
-            async_io::Timer::after(left).await;
+            tokio::time::sleep(left).await;
         }
     }
 
@@ -454,7 +454,7 @@ async fn tx_task(
                         // Drain the transmission pipeline and write remaining bytes on the wire
                         let mut batches = pipeline.drain();
                         for (mut b, _) in batches.drain(..) {
-                            async_std::future::timeout(config.join_interval, link.send_batch(&mut b))
+                            tokio::time::timeout(config.join_interval, link.send_batch(&mut b))
                                 .await
                                 .map_err(|_| {
                                     zerror!(

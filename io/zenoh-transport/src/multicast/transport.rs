@@ -394,7 +394,7 @@ impl TransportMulticastInner {
         let task = async move {
             loop {
                 tokio::select! {
-                    _ = async_io::Timer::after(join.lease) => {
+                    _ = tokio::time::sleep(join.lease) => {
                         if !c_is_active.swap(false, Ordering::AcqRel) {
                             break
                         }

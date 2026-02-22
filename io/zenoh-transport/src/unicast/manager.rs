@@ -760,7 +760,7 @@ impl TransportManager {
         };
 
         // Open the link
-        async_std::future::timeout(self.config.unicast.open_timeout, async {
+        tokio::time::timeout(self.config.unicast.open_timeout, async {
             match manager.new_link(endpoint.clone()).await {
                 Ok(link) => super::establishment::open::open_link(endpoint, link, self).await,
                 Err(e) => Err(e),
@@ -815,7 +815,7 @@ impl TransportManager {
         let c_manager = self.clone();
         self.task_controller
             .spawn_with_rt(zenoh_runtime::ZRuntime::Acceptor, async move {
-                if async_std::future::timeout(
+                if tokio::time::timeout(
                     c_manager.config.unicast.accept_timeout,
                     super::establishment::accept::accept_link(link, &c_manager),
                 )
