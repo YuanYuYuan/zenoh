@@ -185,3 +185,43 @@ All two-process modes now complete successfully without deadlock or panic.
 - P95: both equal at 33-34µs.
 - The 2µs P50 absolute delta is the inherent cost of async primitive transition;
   accepted as correct trade-off for correctness and scalability under load.
+
+---
+
+## Inline Routing Experiment: Pull-Based Transport (2026-02-22, REVERTED)
+
+### Goal
+
+Eliminate the 2µs P50 gap by routing messages inline on the RX task instead of
+through the per-face mpsc consumer task. Hypothesis: no task-wakeup overhead = faster.
+
+### Approach
+
+Added `AsyncMessageHandler` trait to `zenoh-transport` with `handle_message_async` returning
+`Pin<Box<dyn Future<...>>>` (one heap allocation per message). `DeMux` implements it, routing
+inline via `route_inline()`. The RX task calls `read_messages_async` which awaits each message
+routing before reading the next.
+
+### Results (parallel comparison, 1000 samples)
+
+| Metric | main  | true-async(inline) | true-async(mpsc) |
+|--------|------:|-------------------:|-----------------:|
+| P50    |  24µs |             **32µs** |            27µs |
+| P95    |  29µs |               43µs  |            34µs |
+| P99    |  38µs |               52µs  |            43µs |
+
+### Conclusion: REJECTED
+
+The inline approach with `dyn AsyncMessageHandler + Box::pin` is **5µs WORSE** than
+the mpsc queue. Root cause: each message causes one `Box::pin` heap allocation for the
+boxed async state machine. The state machine includes `route_inline`'s entire call chain
+(routing table lookups, subscriber iteration) — likely 300-800 bytes per allocation.
+The allocation + deallocation overhead (~200-500ns) plus cache pressure costs more than
+the ~1µs consumer task wakeup it eliminates.
+
+The generic-closure approach from the original plan (no `dyn`, no `Box::pin`, monomorphized
+at call site) would avoid this overhead, but requires exposing `TransportLinkUnicastRx` to
+`runtime/mod.rs` — a significant transport-layer refactoring deferred to a future branch.
+
+**Decision**: Reverted. Keep mpsc queue (P50=27µs, P99=43µs). The P99 improvement vs main
+is retained; the P50 gap remains as accepted technical debt.
