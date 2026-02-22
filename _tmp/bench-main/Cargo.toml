@@ -17,3 +17,9 @@ path = "src/bench_ping.rs"
 [[bin]]
 name = "bench_pong_main"
 path = "src/bench_pong.rs"
+
+[profile.perf]
+inherits = "release"
+debug = 1
+lto = false
+codegen-units = 16

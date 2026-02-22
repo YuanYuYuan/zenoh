@@ -283,3 +283,11 @@ debug = false     # If you want debug symbol in release mode, set the env variab
 lto = "fat"
 opt-level = 3
 panic = "abort"
+
+# perf: release optimisations + frame pointers + line-level debug info for perf/flamegraph.
+# Usage: cargo build --profile perf -p bench-ping-pong
+[profile.perf]
+inherits = "release"
+debug = 1          # line tables only (small binary, good perf output)
+lto = false        # faster build; thin LTO would work too but isn't needed for profiling
+codegen-units = 16 # faster build for profiling iteration

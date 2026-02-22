@@ -56,7 +56,26 @@ async fn main() {
         rtts.push(t0.elapsed().as_micros());
     }
 
+    let mut lats: Vec<u128> = rtts.iter().map(|rtt| rtt / 2).collect();
+    lats.sort_unstable();
+    let n = lats.len();
+
     for (i, rtt) in rtts.iter().enumerate() {
         println!("{payload} bytes: seq={i} rtt={rtt}µs lat={}µs", rtt / 2);
     }
+
+    // Summary statistics
+    let sum: u128 = lats.iter().sum();
+    eprintln!("---");
+    eprintln!(
+        "stats: N={n} min={}µs p25={}µs p50={}µs p75={}µs p95={}µs p99={}µs max={}µs avg={:.1}µs",
+        lats[0],
+        lats[n * 25 / 100],
+        lats[n * 50 / 100],
+        lats[n * 75 / 100],
+        lats[n * 95 / 100],
+        lats[n * 99 / 100],
+        lats[n - 1],
+        sum as f64 / n as f64,
+    );
 }
