@@ -38,11 +38,11 @@ use crate::{
 /*            TRANSPORT RX           */
 /*************************************/
 impl TransportUnicastUniversal {
-    async fn trigger_callback(
+    fn trigger_callback(
         &self,
         callback: &dyn TransportPeerEventHandler,
         #[allow(unused_mut)] // shared-memory feature requires mut
-        mut msg: NetworkMessageMut<'_>,
+        mut msg: NetworkMessageMut,
         #[cfg(feature = "stats")] stats: &zenoh_stats::LinkStats,
     ) -> ZResult<()> {
         #[cfg(feature = "stats")]
@@ -61,7 +61,7 @@ impl TransportUnicastUniversal {
                 }
             }
         }
-        callback.handle_message_async(msg).await
+        callback.handle_message(msg)
     }
 
     fn handle_close(&self, link: &Link, _reason: u8, session: bool) -> ZResult<()> {
@@ -81,9 +81,9 @@ impl TransportUnicastUniversal {
         Ok(())
     }
 
-    async fn handle_frame(
+    fn handle_frame(
         &self,
-        frame: FrameReader<'_, ZSlice>,
+        frame: FrameReader<ZSlice>,
         #[cfg(feature = "stats")] stats: &zenoh_stats::LinkStats,
     ) -> ZResult<()> {
         let priority = frame.ext_qos.priority();
@@ -99,19 +99,15 @@ impl TransportUnicastUniversal {
             );
         };
 
-        // Verify SN under a scoped guard so the MutexGuard is dropped before any .await.
-        let sn_ok = {
-            let mut guard = match frame.reliability {
-                Reliability::Reliable => zlock!(c.reliable),
-                Reliability::BestEffort => zlock!(c.best_effort),
-            };
-            self.verify_sn("Frame", frame.sn, &mut guard)?
+        let mut guard = match frame.reliability {
+            Reliability::Reliable => zlock!(c.reliable),
+            Reliability::BestEffort => zlock!(c.best_effort),
         };
 
-        if !sn_ok {
+        if !self.verify_sn("Frame", frame.sn, &mut guard)? {
+            // Drop invalid message and continue
             return Ok(());
         }
-
         let callback = self.callback.load_full();
         if let Some(callback) = callback.as_deref() {
             for mut msg in frame {
@@ -120,8 +116,7 @@ impl TransportUnicastUniversal {
                     msg.as_mut(),
                     #[cfg(feature = "stats")]
                     stats,
-                )
-                .await?;
+                )?;
             }
         } else {
             tracing::debug!(
@@ -133,7 +128,7 @@ impl TransportUnicastUniversal {
         Ok(())
     }
 
-    async fn handle_fragment(
+    fn handle_fragment(
         &self,
         fragment: Fragment,
         #[cfg(feature = "stats")] stats: &zenoh_stats::LinkStats,
@@ -160,65 +155,58 @@ impl TransportUnicastUniversal {
             );
         };
 
-        // Defragment under the guard, then release before awaiting the callback.
-        let defragmented = {
-            let mut guard = match reliability {
-                Reliability::Reliable => zlock!(c.reliable),
-                Reliability::BestEffort => zlock!(c.best_effort),
-            };
-
-            if !self.verify_sn("Fragment", sn, &mut guard)? {
-                // Drop invalid message and continue
-                return Ok(());
-            }
-            if self.config.patch.has_fragmentation_markers() {
-                if ext_first.is_some() {
-                    guard.defrag.clear();
-                } else if guard.defrag.is_empty() {
-                    tracing::trace!(
-                        "Transport: {}. First fragment received without start marker.",
-                        self.manager.config.zid,
-                    );
-                    return Ok(());
-                }
-                if ext_drop.is_some() {
-                    guard.defrag.clear();
-                    return Ok(());
-                }
-            }
-            if guard.defrag.is_empty() {
-                let _ = guard.defrag.sync(sn);
-            }
-            if let Err(e) = guard.defrag.push(sn, payload) {
-                // Defrag errors don't close transport
-                tracing::trace!("{}", e);
-                return Ok(());
-            }
-            if !more {
-                guard.defrag.defragment()
-            } else {
-                None
-            }
-            // guard dropped here
+        let mut guard = match reliability {
+            Reliability::Reliable => zlock!(c.reliable),
+            Reliability::BestEffort => zlock!(c.best_effort),
         };
 
-        if let Some(mut msg) = defragmented {
-            let callback = self.callback.load_full();
-            if let Some(callback) = callback.as_deref() {
-                return self
-                    .trigger_callback(
+        if !self.verify_sn("Fragment", sn, &mut guard)? {
+            // Drop invalid message and continue
+            return Ok(());
+        }
+        if self.config.patch.has_fragmentation_markers() {
+            if ext_first.is_some() {
+                guard.defrag.clear();
+            } else if guard.defrag.is_empty() {
+                tracing::trace!(
+                    "Transport: {}. First fragment received without start marker.",
+                    self.manager.config.zid,
+                );
+                return Ok(());
+            }
+            if ext_drop.is_some() {
+                guard.defrag.clear();
+                return Ok(());
+            }
+        }
+        if guard.defrag.is_empty() {
+            let _ = guard.defrag.sync(sn);
+        }
+        if let Err(e) = guard.defrag.push(sn, payload) {
+            // Defrag errors don't close transport
+            tracing::trace!("{}", e);
+            return Ok(());
+        }
+        if !more {
+            // When shared-memory feature is disabled, msg does not need to be mutable
+            if let Some(mut msg) = guard.defrag.defragment() {
+                let callback = self.callback.load_full();
+                if let Some(callback) = callback.as_deref() {
+                    return self.trigger_callback(
                         callback.as_ref(),
                         msg.as_mut(),
                         #[cfg(feature = "stats")]
                         stats,
-                    )
-                    .await;
+                    );
+                } else {
+                    tracing::debug!(
+                        "Transport: {}. No callback available, dropping messages: {:?}",
+                        self.config.zid,
+                        msg
+                    );
+                }
             } else {
-                tracing::debug!(
-                    "Transport: {}. No callback available, dropping messages: {:?}",
-                    self.config.zid,
-                    msg
-                );
+                tracing::trace!("Transport: {}. Defragmentation error.", self.config.zid);
             }
         }
 
@@ -246,9 +234,7 @@ impl TransportUnicastUniversal {
         Ok(true)
     }
 
-    /// Async RX path — used by the standard (non-uring) rx_task.
-    /// Routes each message inline (no per-face consumer task) via handle_message_async.
-    pub(super) async fn read_messages_async(
+    pub(super) fn read_messages(
         &self,
         mut batch: RBatch,
         link: &Link,
@@ -265,8 +251,7 @@ impl TransportUnicastUniversal {
                     frame,
                     #[cfg(feature = "stats")]
                     stats,
-                )
-                .await?;
+                )?;
                 continue;
             }
             let msg: TransportMessage = batch
@@ -282,14 +267,11 @@ impl TransportUnicastUniversal {
 
             match msg.body {
                 TransportBody::Frame(_) => unreachable!(),
-                TransportBody::Fragment(fragment) => {
-                    self.handle_fragment(
-                        fragment,
-                        #[cfg(feature = "stats")]
-                        stats,
-                    )
-                    .await?
-                }
+                TransportBody::Fragment(fragment) => self.handle_fragment(
+                    fragment,
+                    #[cfg(feature = "stats")]
+                    stats,
+                )?,
                 TransportBody::Close(Close { reason, session }) => {
                     self.handle_close(link, reason, session)?
                 }
@@ -304,88 +286,7 @@ impl TransportUnicastUniversal {
             }
         }
 
-        Ok(())
-    }
-
-    /// Sync RX path — kept for the io_uring path where the callback is called
-    /// from a completion handler and cannot directly await.
-    pub(super) fn read_messages(
-        &self,
-        mut batch: RBatch,
-        link: &Link,
-        #[cfg(feature = "stats")] stats: &zenoh_stats::LinkStats,
-    ) -> ZResult<()> {
-        while !batch.is_empty() {
-            if let Ok(frame) = batch.decode() {
-                let frame: FrameReader<'_, ZSlice> = frame;
-                tracing::trace!("Received: {:?}", frame);
-                #[cfg(feature = "stats")]
-                {
-                    stats.inc_transport_message(zenoh_stats::Rx, 1);
-                }
-                let priority = frame.ext_qos.priority();
-                let c = if self.is_qos() {
-                    &self.priority_rx[priority as usize]
-                } else if priority == Priority::DEFAULT {
-                    &self.priority_rx[0]
-                } else {
-                    bail!(
-                        "Transport: {}. Unknown priority: {:?}.",
-                        self.config.zid,
-                        priority
-                    );
-                };
-                let mut guard = match frame.reliability {
-                    Reliability::Reliable => zlock!(c.reliable),
-                    Reliability::BestEffort => zlock!(c.best_effort),
-                };
-                if !self.verify_sn("Frame", frame.sn, &mut guard)? {
-                    continue;
-                }
-                let callback = self.callback.load_full();
-                if let Some(callback) = callback.as_deref() {
-                    for mut msg in frame {
-                        #[cfg(feature = "stats")]
-                        stats.inc_network_message(
-                            zenoh_stats::Rx,
-                            zenoh_protocol::network::NetworkMessageExt::as_ref(&msg.as_ref()),
-                        );
-                        callback.handle_message(msg.as_mut())?;
-                    }
-                }
-                continue;
-            }
-            let msg: TransportMessage = batch
-                .decode()
-                .map_err(|_| zerror!("{}: decoding error", link))?;
-
-            tracing::trace!("Received: {:?}", msg);
-
-            #[cfg(feature = "stats")]
-            {
-                stats.inc_transport_message(zenoh_stats::Rx, 1);
-            }
-
-            match msg.body {
-                TransportBody::Frame(_) => unreachable!(),
-                TransportBody::Fragment(_) => {
-                    // Fragment handling via sync path is complex; skip for uring.
-                    // The uring path primarily handles regular frames.
-                    tracing::debug!("Transport: {}. Fragment on uring path — not yet supported", self.config.zid);
-                }
-                TransportBody::Close(Close { reason, session }) => {
-                    self.handle_close(link, reason, session)?
-                }
-                TransportBody::KeepAlive(KeepAlive { .. }) => {}
-                _ => {
-                    tracing::debug!(
-                        "Transport: {}. Message handling not implemented: {:?}",
-                        self.config.zid,
-                        msg
-                    );
-                }
-            }
-        }
+        // Process the received message
 
         Ok(())
     }
