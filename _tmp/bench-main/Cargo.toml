@@ -1,0 +1,19 @@
+[workspace]
+
+[package]
+name = "bench-main"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+zenoh = { path = "/home/circle/Workings/ZettaScale/zenoh-ws/project/zenoh-src/src/zenoh/zenoh", default-features = false, features = ["transport_tcp"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[[bin]]
+name = "bench_ping_main"
+path = "src/bench_ping.rs"
+
+[[bin]]
+name = "bench_pong_main"
+path = "src/bench_pong.rs"

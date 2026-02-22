@@ -1,0 +1,17 @@
+[package]
+name = "bench-ping-pong"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+zenoh = { path = "../../zenoh", default-features = false, features = ["transport_tcp"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[[bin]]
+name = "bench_ping"
+path = "src/bench_ping.rs"
+
+[[bin]]
+name = "bench_pong"
+path = "src/bench_pong.rs"
