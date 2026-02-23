@@ -40,7 +40,7 @@ use crate::{
         universal::link::TransportLinkUnicastUniversal,
         TransportConfigUnicast,
     },
-    TransportManager, TransportPeerEventHandler,
+    RxHandle, TransportManager, TransportPeerEventHandler,
 };
 
 /*************************************/
@@ -303,8 +303,31 @@ impl TransportUnicastTrait for TransportUnicastUniversal {
         });
 
         let start_rx = Box::new(move || {
-            // Start the RX loop
-            link.start_rx(transport, other_lease);
+            // Non-uring path: offer the link_rx to the callback so it can drive
+            // RX inline (single driver task).  Fall back to the built-in rx_task
+            // when the callback does not implement take_over_rx (or there is none).
+            #[cfg(not(feature = "uring"))]
+            {
+                let rx_buffer_size = transport.manager.config.link_rx_buffer_size;
+                if let Some(callback) = transport.callback.load_full() {
+                    let handle = RxHandle {
+                        link_rx: link.link.rx(),
+                        transport: transport.clone(),
+                        token: link.token.clone(),
+                        lease: other_lease,
+                        rx_buffer_size,
+                    };
+                    if callback.take_over_rx(handle) {
+                        return; // callback is driving RX
+                    }
+                }
+                // Fallback: spawn the built-in RX task.
+                link.start_rx(transport, other_lease);
+            }
+            #[cfg(feature = "uring")]
+            {
+                link.start_rx(transport, other_lease);
+            }
         });
 
         Ok((start_tx, start_rx, ack, Some(add_link_guard)))

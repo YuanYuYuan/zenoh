@@ -54,7 +54,7 @@ pub(super) struct TransportLinkUnicastUniversal {
     pub(super) pipeline: TransmissionPipelineProducer,
     // The task handling substruct
     tracker: TaskTracker,
-    token: CancellationToken,
+    pub(super) token: CancellationToken,
     #[cfg(feature = "unstable")]
     // Notifier for a BlockFirst message to be ready to be sent
     // (after the previous one has been sent)

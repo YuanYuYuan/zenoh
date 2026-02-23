@@ -11,7 +11,7 @@
 // Contributors:
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
-use std::sync::MutexGuard;
+use std::sync::{Arc, MutexGuard};
 
 use zenoh_buffers::ZSlice;
 use zenoh_codec::transport::frame::FrameReader;
@@ -31,7 +31,7 @@ use crate::{
         priority::TransportChannelRx,
     },
     unicast::transport_unicast_inner::TransportUnicastTrait,
-    TransportPeerEventHandler,
+    MessageHandlerAsync, TransportPeerEventHandler,
 };
 
 /*************************************/
@@ -232,6 +232,192 @@ impl TransportUnicastUniversal {
         }
 
         Ok(true)
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // Async batch processing (single-driver / non-uring path)
+    // ─────────────────────────────────────────────────────────
+
+    /// Decode a frame and call `handler.on_message()` for each contained
+    /// network message.  The SN mutex is released before any `.await`.
+    async fn handle_frame_with_handler(
+        &self,
+        frame: FrameReader<'_, ZSlice>,
+        _link: &Link,
+        handler: &Arc<dyn MessageHandlerAsync>,
+    ) -> ZResult<()> {
+        let priority = frame.ext_qos.priority();
+        let c = if self.is_qos() {
+            &self.priority_rx[priority as usize]
+        } else if priority == Priority::DEFAULT {
+            &self.priority_rx[0]
+        } else {
+            bail!(
+                "Transport: {}. Unknown priority: {:?}.",
+                self.config.zid,
+                priority
+            );
+        };
+
+        // SN verification — hold mutex only for this check, drop before await.
+        let sn_ok = {
+            let mut guard = match frame.reliability {
+                Reliability::Reliable => zlock!(c.reliable),
+                Reliability::BestEffort => zlock!(c.best_effort),
+            };
+            self.verify_sn("Frame", frame.sn, &mut guard)?
+        };
+
+        if !sn_ok {
+            return Ok(());
+        }
+
+        for mut msg in frame {
+            #[cfg(feature = "shared-memory")]
+            if let Some(shm_context) = &self.shm_context {
+                if let Err(e) =
+                    crate::shm::map_zmsg_to_shmbuf(msg.as_mut(), &shm_context.shm_reader)
+                {
+                    tracing::debug!("Error receiving SHM buffer: {e}");
+                    continue;
+                }
+            }
+            handler.on_message(msg.as_mut()).await?;
+        }
+        Ok(())
+    }
+
+    /// Reassemble a fragment and, once complete, call `handler.on_message()`.
+    /// The defrag mutex is released before any `.await`.
+    async fn handle_fragment_with_handler(
+        &self,
+        fragment: Fragment,
+        _link: &Link,
+        handler: &Arc<dyn MessageHandlerAsync>,
+    ) -> ZResult<()> {
+        let Fragment {
+            reliability,
+            more,
+            sn,
+            ext_qos: qos,
+            ext_first,
+            ext_drop,
+            payload,
+        } = fragment;
+
+        let c = if self.is_qos() {
+            &self.priority_rx[qos.priority() as usize]
+        } else if qos.priority() == Priority::DEFAULT {
+            &self.priority_rx[0]
+        } else {
+            bail!(
+                "Transport: {}. Unknown priority: {:?}.",
+                self.config.zid,
+                qos.priority()
+            );
+        };
+
+        // Acquire the SN/defrag mutex only for synchronous work; release before await.
+        let maybe_msg = {
+            let mut guard = match reliability {
+                Reliability::Reliable => zlock!(c.reliable),
+                Reliability::BestEffort => zlock!(c.best_effort),
+            };
+
+            if !self.verify_sn("Fragment", sn, &mut guard)? {
+                return Ok(());
+            }
+            if self.config.patch.has_fragmentation_markers() {
+                if ext_first.is_some() {
+                    guard.defrag.clear();
+                } else if guard.defrag.is_empty() {
+                    tracing::trace!(
+                        "Transport: {}. First fragment received without start marker.",
+                        self.manager.config.zid,
+                    );
+                    return Ok(());
+                }
+                if ext_drop.is_some() {
+                    guard.defrag.clear();
+                    return Ok(());
+                }
+            }
+            if guard.defrag.is_empty() {
+                let _ = guard.defrag.sync(sn);
+            }
+            if let Err(e) = guard.defrag.push(sn, payload) {
+                tracing::trace!("{}", e);
+                return Ok(());
+            }
+            if !more {
+                guard.defrag.defragment()
+            } else {
+                None
+            }
+            // guard dropped here, before any await
+        };
+
+        if let Some(mut msg) = maybe_msg {
+            #[cfg(feature = "shared-memory")]
+            if let Some(shm_context) = &self.shm_context {
+                if let Err(e) =
+                    crate::shm::map_zmsg_to_shmbuf(msg.as_mut(), &shm_context.shm_reader)
+                {
+                    tracing::debug!("Error receiving SHM buffer: {e}");
+                    return Ok(());
+                }
+            }
+            handler.on_message(msg.as_mut()).await?;
+        } else if !more {
+            tracing::trace!("Transport: {}. Defragmentation error.", self.config.zid);
+        }
+
+        Ok(())
+    }
+
+    /// Decode an entire received batch and call `handler.on_message()` for each
+    /// network message.  Equivalent to [`read_messages`] but fully async: SN
+    /// mutexes are released before every `.await`, so no blocking occurs.
+    ///
+    /// Used by the single-task RX driver (non-uring path).
+    pub(crate) async fn handle_batch_with_handler(
+        &self,
+        mut batch: RBatch,
+        link: &Link,
+        handler: &Arc<dyn MessageHandlerAsync>,
+    ) -> ZResult<()> {
+        while !batch.is_empty() {
+            if let Ok(frame) = batch.decode() {
+                tracing::trace!("Received: {:?}", frame);
+                self.handle_frame_with_handler(frame, link, handler).await?;
+                continue;
+            }
+            let msg: TransportMessage = batch
+                .decode()
+                .map_err(|_| zerror!("{}: decoding error", link))?;
+
+            tracing::trace!("Received: {:?}", msg);
+
+            match msg.body {
+                TransportBody::Frame(_) => unreachable!(),
+                TransportBody::Fragment(fragment) => {
+                    self.handle_fragment_with_handler(fragment, link, handler)
+                        .await?
+                }
+                TransportBody::Close(Close { reason, session }) => {
+                    self.handle_close(link, reason, session)?
+                }
+                TransportBody::KeepAlive(KeepAlive { .. }) => {}
+                _ => {
+                    tracing::debug!(
+                        "Transport: {}. Message handling not implemented: {:?}",
+                        self.config.zid,
+                        msg
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn read_messages(

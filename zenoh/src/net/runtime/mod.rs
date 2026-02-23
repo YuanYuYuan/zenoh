@@ -85,8 +85,9 @@ use zenoh_shm::reader::ShmReader;
 use zenoh_sync::get_mut_unchecked;
 use zenoh_task::TaskController;
 use zenoh_transport::{
-    multicast::TransportMulticast, unicast::TransportUnicast, TransportEventHandler,
-    TransportManager, TransportMulticastEventHandler, TransportPeer, TransportPeerEventHandler,
+    multicast::TransportMulticast, unicast::TransportUnicast, MessageHandlerAsync,
+    RxHandle, TransportEventHandler, TransportManager, TransportMulticastEventHandler,
+    TransportPeer, TransportPeerEventHandler, run_unicast_rx_driver,
 };
 
 use self::orchestrator::StartConditions;
@@ -1151,6 +1152,21 @@ impl TransportPeerEventHandler for RuntimeSession {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    /// Non-uring path: take over RX by spawning the single driver task.
+    ///
+    /// The driver task calls `DeMux::route_inline()` for each decoded message,
+    /// routing inline without any inter-task handoff.
+    #[cfg(not(feature = "uring"))]
+    fn take_over_rx(&self, handle: RxHandle) -> bool {
+        let handler: Arc<dyn MessageHandlerAsync> = self.main_handler.clone();
+        zenoh_runtime::ZRuntime::Net
+            .deref()
+            .spawn(async move {
+                run_unicast_rx_driver(handle, handler).await;
+            });
+        true
     }
 }
 
