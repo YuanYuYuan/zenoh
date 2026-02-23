@@ -333,9 +333,16 @@ pub async fn route_data(
                             .egress_filter(&tables, face, outface, &expr)
                         {
                             drop(tables);
-                            msg.wire_expr = key_expr.into();
-                            msg.ext_nodeid = ext::NodeIdType { node_id: *context };
-                            let mut msg_to_send = msg.clone();
+                            // Construct msg_to_send directly — avoids cloning the wire_expr
+                            // string a second time (the original code set msg.wire_expr then
+                            // cloned msg, paying for two string allocations).
+                            let msg_to_send = Push {
+                                wire_expr: key_expr.into(),
+                                ext_qos: msg.ext_qos,
+                                ext_tstamp: msg.ext_tstamp,
+                                ext_nodeid: ext::NodeIdType { node_id: *context },
+                                payload: msg.payload.clone(),
+                            };
                             if outface.primitives.send_push(msg_to_send, reliability).await {
                                 #[cfg(feature = "stats")]
                                 payload_observer.observe_payload(zenoh_stats::Tx, outface, msg);

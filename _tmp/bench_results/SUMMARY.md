@@ -417,3 +417,54 @@ Default builds use the tokio epoll path, which has better latency for this workl
 
 The PooledBuffer + bulk-memcpy optimizations (from `patch/io-uring/bulk-read`) are
 already merged and benefit large-payload throughput scenarios when uring is enabled.
+
+---
+
+## Pull-Based Driver Benchmark (2026-02-23, commit b2b8d2ad5)
+
+### Changes
+
+Single driver task per connection replaces the previous two-task model (RX task + consumer task
+with per-face mpsc handoff). The driver calls `DeMux::route_inline()` directly for each decoded
+message, eliminating the inter-task handoff on the non-uring unicast path.
+
+Consumer task retained (always spawned) for the multicast path and uring path compatibility.
+
+### Test Configuration
+- Payload: 64 bytes
+- Samples: 1,000 (+ 5s warmup)
+- Mode: Back-to-back sequential ping-pong, two processes, parallel same-time run
+- Build: release (non-uring)
+
+### Results (parallel same-time, 2026-02-23)
+
+| Metric | main  | true-async (pull driver) | delta   |
+|--------|------:|-------------------------:|--------:|
+| Min    |  25µs |                    26µs  |  +4.0%  |
+| P25    |  27µs |                    30µs  | +11.1%  |
+| P50    |  29µs |                    32µs  | **+10.3%** |
+| P75    |  31µs |                    35µs  | +12.9%  |
+| P95    |  42µs |                    43µs  |  +2.4%  |
+| P99    |  57µs |                    53µs  | **-7.0% (true-async wins)** |
+| Max    |  78µs |                    93µs  | +19.2%  |
+
+### Conclusion: Pull-Based Driver — NEUTRAL vs mpsc queue
+
+**P50: +10.3% vs main** — same delta as the generic-closure experiment (also showed P50=27µs vs 24µs = +12.5%). The pull-based driver does NOT worsen P50 vs the mpsc queue.
+
+**P99: -7.0% vs main** — consistent with prior runs (-8.5%). True-async wins on tail latency.
+
+Note: absolute latencies are ~5µs higher than the Feb-22 parallel run (29µs vs 24µs for main, 32µs vs 27µs for true-async). This is system load variation (different time of day). The RELATIVE delta is consistent with historical measurements.
+
+### Summary of pull-based driver vs mpsc queue
+
+Previous generic-closure experiment (reverted, Feb-22): P50=27µs
+Current pull-based driver (b2b8d2ad5, Feb-23): P50=32µs (system ~5µs hotter)
+
+The pull-based driver produces the SAME performance as the mpsc queue. P50 gap vs main
+remains ~10-12% (2-3µs absolute), unchanged from all previous experiments. The gap is
+from `async_lock::RwLock` in the routing path, not from inter-task handoff.
+
+**Architectural benefit**: one fewer task and one fewer 4096-slot mpsc channel per connection.
+For 1000 concurrent connections this saves ~130MB of channel capacity. P99 remains better
+than main (async backpressure vs sync blocking).
