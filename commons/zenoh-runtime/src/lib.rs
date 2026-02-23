@@ -80,7 +80,16 @@ impl ZRuntime {
         #[cfg(feature = "tracing-instrument")]
         let f = tracing::Instrument::instrument(f, tracing::Span::current());
 
-        tokio::task::block_in_place(move || get_shared_handle().block_on(f))
+        // `tokio::task::block_in_place` requires the caller to be running inside a
+        // multi-thread tokio runtime.  When called from a plain `fn main()` (no
+        // tokio runtime active) it panics with "no reactor running".
+        // Detect this with `try_current()` and fall back to a direct `block_on` on
+        // the shared runtime, which works from any non-async thread.
+        if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::task::block_in_place(move || get_shared_handle().block_on(f))
+        } else {
+            get_shared_handle().block_on(f)
+        }
     }
 }
 

@@ -8,6 +8,9 @@ publish = false
 zenoh = { path = "../../zenoh", default-features = false, features = ["transport_tcp"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
+[features]
+uring = ["zenoh/uring"]
+
 [[bin]]
 name = "bench_ping"
 path = "src/bench_ping.rs"

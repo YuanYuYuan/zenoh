@@ -911,14 +911,23 @@ impl TransmissionPipelineProducer {
         if msg.is_droppable() && self.status.is_congested(priority) {
             return Ok(false);
         }
-        let mut sent = queue.push_network_message(msg, priority, &mut deadline)?;
+        // Use block_in_place so that the sync inner push (which may block waiting for a
+        // batch to become available in the refill pool) does not starve the tokio runtime.
+        // Without this, fragmented messages (>batch_size) can deadlock: the TX task that
+        // refills batches cannot run because the current worker thread is blocked in the
+        // sync wait inside push_network_message.
+        let mut sent = tokio::task::block_in_place(|| {
+            queue.push_network_message(msg, priority, &mut deadline)
+        })?;
         // If the message cannot be sent, mark the pipeline as congested.
         if !sent {
             self.status.set_congested(priority, true);
             // During the time between deadline wakeup and setting the congested flag,
             // all batches could have been refilled (especially if there is a single one),
             // so try again with the same already expired deadline.
-            sent = queue.push_network_message(msg, priority, &mut deadline)?;
+            sent = tokio::task::block_in_place(|| {
+                queue.push_network_message(msg, priority, &mut deadline)
+            })?;
             // If the message is sent in the end, reset the status.
             // Setting the status to `true` is only done with the stage_in mutex acquired,
             // so it is not possible that further messages see the congestion flag set

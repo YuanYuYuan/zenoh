@@ -176,7 +176,7 @@ impl<'b> Resolvable for QuerierBuilder<'_, 'b> {
 impl Wait for QuerierBuilder<'_, '_> {
     fn wait(self) -> <Self as Resolvable>::To {
         let mut key_expr = self.key_expr?;
-        key_expr = tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(self.session.declare_keyexpr(key_expr)))?;
+        key_expr = zenoh_runtime::ZRuntime::Application.block_in_place(self.session.declare_keyexpr(key_expr))?;
         let id = self
             .session
             .declare_querier_inner(key_expr.clone(), self.destination)?;

@@ -40,6 +40,21 @@ use std::{
 pub use adminspace::AdminSpace;
 use async_trait::async_trait;
 use futures::Future;
+
+/// Block the current thread on a future.
+///
+/// Uses `tokio::task::block_in_place` when inside a multi-thread tokio runtime
+/// (which yields the thread slot to other tasks), or falls back to
+/// `block_on` directly on the shared zenoh runtime when called from outside
+/// any tokio context (e.g. a plain `fn main()`).
+fn block_on_sync<F: Future>(f: F) -> F::Output {
+    use std::ops::Deref;
+    if tokio::runtime::Handle::try_current().is_ok() {
+        tokio::task::block_in_place(move || zenoh_runtime::ZRuntime::Net.deref().block_on(f))
+    } else {
+        zenoh_runtime::ZRuntime::Net.deref().block_on(f)
+    }
+}
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uhlc::{HLCBuilder, HLC};
@@ -276,10 +291,7 @@ impl IRuntime for RuntimeState {
 
     fn get_zids(&self, whatami: WhatAmI) -> Box<dyn Iterator<Item = ZenohId> + Send + Sync> {
         Box::new(
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current()
-                    .block_on(self.manager().get_transports_unicast())
-            })
+            block_on_sync(self.manager().get_transports_unicast())
             .into_iter()
             .filter_map(move |s| {
                     s.get_whatami()
@@ -295,18 +307,12 @@ impl IRuntime for RuntimeState {
     }
 
     fn get_transports(&self) -> Box<dyn Iterator<Item = Transport> + Send + Sync> {
-        let unicast_transports = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(self.manager.get_transports_unicast())
-        })
+        let unicast_transports = block_on_sync(self.manager.get_transports_unicast())
         .into_iter()
         .filter_map(|t| t.get_peer().ok())
         .map(|ref peer| Transport::new(peer, false));
 
-        let multicast_transports = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(self.manager.get_transports_multicast())
-        })
+        let multicast_transports = block_on_sync(self.manager.get_transports_multicast())
         .into_iter()
         .flat_map(|t| t.get_peers().ok().unwrap_or_default())
         .map(|ref peer| Transport::new(peer, true));
@@ -356,7 +362,7 @@ impl IRuntime for RuntimeState {
             .map(|ns| (ns / key_expr.deref()).into());
 
         let router = self.router();
-        let tables = tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(router.tables.tables.read()));
+        let tables = block_on_sync(router.tables.tables.read());
 
         let (broker_hat, other_hats) = tables
             .hats
@@ -502,20 +508,14 @@ impl RuntimeState {
     }
 
     fn get_transports_unicast_peers(&self) -> Vec<TransportPeer> {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(self.manager.get_transports_unicast())
-        })
+        block_on_sync(self.manager.get_transports_unicast())
         .into_iter()
         .filter_map(|t| t.get_peer().ok())
         .collect::<Vec<_>>()
     }
 
     fn get_transports_multicast_peers(&self) -> Vec<Vec<TransportPeer>> {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(self.manager.get_transports_multicast())
-        })
+        block_on_sync(self.manager.get_transports_multicast())
         .into_iter()
         .filter_map(|t| t.get_peers().ok())
         .collect::<Vec<_>>()

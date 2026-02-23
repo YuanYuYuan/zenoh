@@ -458,7 +458,7 @@ impl Wait for PublisherBuilder<'_, '_> {
     fn wait(mut self) -> <Self as Resolvable>::To {
         self = self.apply_qos_overwrites();
         let mut key_expr = self.key_expr?;
-        key_expr = tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(self.session.declare_keyexpr(key_expr)))?;
+        key_expr = zenoh_runtime::ZRuntime::Application.block_in_place(self.session.declare_keyexpr(key_expr))?;
         let id = self
             .session
             .declare_publisher_inner(key_expr.clone(), self.destination)?;
