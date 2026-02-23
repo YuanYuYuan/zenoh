@@ -266,6 +266,130 @@ fn get_data_route(
     }
 }
 
+/// Sync fast path for routing a Push message.
+/// Returns `true` if all outfaces were pushed to successfully (sync, no `.await` needed).
+/// Returns `false` if any step would block — caller must fall back to `route_data().await`.
+#[inline]
+pub(crate) fn try_route_push_sync(
+    tables_ref: &Arc<TablesLock>,
+    face: &FaceState,
+    msg: &mut Push,
+    reliability: Reliability,
+) -> bool {
+    // 1. Try routing table read lock (non-blocking)
+    let Some(tables) = tables_ref.tables.try_read() else {
+        return false;
+    };
+
+    let Some(prefix) = tables.get_mapping(face, &msg.wire_expr.scope, msg.wire_expr.mapping)
+    else {
+        return false;
+    };
+
+    let expr = RoutingExpr::new(prefix, msg.wire_expr.suffix.as_ref());
+
+    if !tables_ref.hat_code.ingress_filter(&tables, face, &expr) {
+        return true; // filtered out, nothing to do — success
+    }
+
+    let route = get_data_route(
+        tables_ref.hat_code.as_ref(),
+        &tables,
+        face,
+        &expr,
+        msg.ext_nodeid.node_id,
+    );
+    if route.is_empty() {
+        return true; // no subscribers, nothing to do — success
+    }
+
+    // Inline treat_timestamp logic — cannot use the macro because it uses `return;`
+    // which doesn't match our `-> bool` return type.
+    if let Some(hlc) = &tables.hlc {
+        if let PushBody::Put(data) = &mut msg.payload {
+            if let Some(ref ts) = data.timestamp {
+                match hlc.update_with_timestamp(ts) {
+                    Ok(()) => (),
+                    Err(e) => {
+                        if tables.drop_future_timestamp {
+                            tracing::error!(
+                                "Error treating timestamp for received Data ({}). Drop it!",
+                                e
+                            );
+                            return true; // intentionally dropped
+                        } else {
+                            data.timestamp = Some(hlc.new_timestamp());
+                            tracing::error!(
+                                "Error treating timestamp for received Data ({}). Replace timestamp: {:?}",
+                                e,
+                                data.timestamp
+                            );
+                        }
+                    }
+                }
+            } else {
+                data.timestamp = Some(hlc.new_timestamp());
+                tracing::trace!("Adding timestamp to DataInfo: {:?}", data.timestamp);
+            }
+        }
+    }
+
+    if route.len() == 1 {
+        let (outface, key_expr, context) = route.iter().next().unwrap();
+        if tables_ref
+            .hat_code
+            .egress_filter(&tables, face, outface, &expr)
+        {
+            drop(tables); // release read lock before pushing
+            let msg_to_send = Push {
+                wire_expr: key_expr.into(),
+                ext_qos: msg.ext_qos,
+                ext_tstamp: msg.ext_tstamp,
+                ext_nodeid: ext::NodeIdType { node_id: *context },
+                payload: msg.payload.clone(),
+            };
+            if outface
+                .primitives
+                .try_push_sync(&msg_to_send, reliability)
+            {
+                // Reset wire_expr to indicate the message has been consumed
+                msg.wire_expr = WireExpr::empty();
+                return true;
+            }
+            return false; // outface couldn't push sync — async fallback needed
+        }
+        // egress filtered — success (nothing to send)
+        return true;
+    }
+
+    // Multi-subscriber: collect eligible outfaces before dropping table lock
+    let eligible: Vec<_> = route
+        .iter()
+        .filter(|(outface, _key_expr, _context)| {
+            tables_ref
+                .hat_code
+                .egress_filter(&tables, face, outface, &expr)
+        })
+        .cloned()
+        .collect();
+
+    drop(tables);
+
+    for (outface, key_expr, context) in &eligible {
+        let msg_to_send = Push {
+            wire_expr: key_expr.clone(),
+            ext_qos: msg.ext_qos,
+            ext_tstamp: None,
+            ext_nodeid: ext::NodeIdType { node_id: *context },
+            payload: msg.payload.clone(),
+        };
+        if !outface.primitives.try_push_sync(&msg_to_send, reliability) {
+            return false; // one outface failed — async fallback handles all
+        }
+    }
+    true
+}
+
 pub async fn route_data(
     tables_ref: &Arc<TablesLock>,
     src_face: &FaceState,

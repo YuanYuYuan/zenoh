@@ -397,6 +397,16 @@ impl Face {
         }
     }
 
+    /// Sync fast path for routing push. Returns `false` if async fallback is needed.
+    #[inline]
+    pub(crate) fn try_route_push_sync(
+        &self,
+        msg: &mut Push,
+        reliability: Reliability,
+    ) -> bool {
+        super::pubsub::try_route_push_sync(&self.tables, &self.state, msg, reliability)
+    }
+
     pub(crate) fn reject_interest(&self, interest_id: u32) {
         if let Some(interest) = self.state.pending_current_interests.get(&interest_id) {
             interest.rejection_token.cancel();

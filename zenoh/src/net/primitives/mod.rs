@@ -51,6 +51,13 @@ pub trait Primitives: Send + Sync {
     /// Close the primitives
     async fn close(&self);
 
+    /// Sync fast path for pushing data messages.
+    /// Returns `true` if the message was pushed without needing async operations.
+    /// Default returns `false` — caller falls back to `send_push().await`.
+    fn try_push_sync(&self, _msg: &Push, _reliability: Reliability) -> bool {
+        false
+    }
+
     /// Downcast support for accessing concrete types
     fn as_any(&self) -> &dyn std::any::Any;
 }

@@ -104,6 +104,57 @@ impl TransportUnicastUniversal {
         }
     }
 
+    /// Sync fast path: push a message into the pipeline without any async or blocking.
+    /// Returns `true` on success; `false` means the caller must use `internal_schedule`.
+    ///
+    /// Skips shared-memory mapping (SHM messages always take the async path).
+    #[inline(always)]
+    pub(crate) fn try_push_sync(&self, msg: NetworkMessageRef<'_>) -> bool {
+        #[cfg(feature = "shared-memory")]
+        if msg.is_shm() {
+            return false;
+        }
+
+        let transport_links = self
+            .links
+            .read()
+            .expect("reading `TransportUnicastUniversal::links` should not fail");
+
+        let Some(transport_link_index) = Self::select(
+            transport_links.iter().map(|tl| {
+                (
+                    tl.link
+                        .config
+                        .reliability
+                        .unwrap_or(Reliability::from(tl.link.link.is_reliable())),
+                    tl.link.config.priorities.clone(),
+                )
+            }),
+            Reliability::from(msg.is_reliable()),
+            msg.priority(),
+        ) else {
+            return false;
+        };
+
+        let transport_link = &transport_links[transport_link_index];
+
+        #[cfg(feature = "unstable")]
+        if msg.congestion_control() == CongestionControl::BlockFirst {
+            return false; // BlockFirst requires async handling
+        }
+
+        let pushed = transport_link.pipeline.try_push_fast(msg);
+        if pushed {
+            #[cfg(feature = "stats")]
+            transport_link.stats.inc_network_message(zenoh_stats::Tx, msg);
+        }
+        // Note: we don't call handle_push_result here because:
+        // - If pushed=false, we return false and let the async path handle it
+        //   (which will call handle_push_result with proper error handling)
+        // - If pushed=true, we already recorded stats above
+        pushed
+    }
+
     #[allow(unused_mut)] // When feature "shared-memory" is not enabled
     #[allow(clippy::let_and_return)] // When feature "stats" is not enabled
     #[inline(always)]

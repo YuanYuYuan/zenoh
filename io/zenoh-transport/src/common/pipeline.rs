@@ -467,6 +467,122 @@ impl StageIn {
         Ok(true)
     }
 
+    /// Try to serialize `msg` into the current batch without blocking.
+    /// Returns `true` on success, `false` if no batch is immediately available
+    /// (caller should fall back to the async `push_network_message` path).
+    ///
+    /// Unlike `push_network_message`, this never waits for batch refills and
+    /// never fragments — if the message doesn't fit in a single batch, it
+    /// returns `false` so the async path can handle fragmentation with proper
+    /// deadline/backpressure support.
+    fn push_nowait(
+        &mut self,
+        msg: NetworkMessageRef,
+        priority: Priority,
+    ) -> bool {
+        // Lock the current serialization batch.
+        let mut c_guard = zlock!(self.mutex.shared.current);
+        c_guard.notify_pending();
+
+        // Try to get a batch without waiting.
+        let mut batch = match c_guard.batch.take() {
+            Some(batch) => batch,
+            None => match self.s_ref.pull() {
+                Some(mut batch) => {
+                    batch.clear();
+                    self.s_out.shared.backoff.first_write.store(
+                        LOCAL_EPOCH.elapsed().as_micros() as MicroSeconds,
+                        Ordering::Relaxed,
+                    );
+                    batch
+                }
+                None => return false, // No batch available — fall back to async path
+            },
+        };
+
+        // Attempt serialization on the current batch
+        let e = match batch.encode(msg) {
+            Ok(_) => {
+                if !self.batching || msg.is_express() {
+                    self.s_out.move_batch(batch);
+                } else {
+                    let bytes = batch.len();
+                    c_guard.batch = Some(batch);
+                    drop(c_guard);
+                    self.s_out.notify(bytes);
+                }
+                return true;
+            }
+            Err(e) => e,
+        };
+
+        // Lock the channel for SN and try with a new frame
+        let mut tch = self.mutex.channel(msg.is_reliable());
+        let sn = tch.sn.get();
+
+        let frame = FrameHeader {
+            reliability: msg.reliability,
+            sn,
+            ext_qos: frame::ext::QoSType::new(priority),
+        };
+
+        if let BatchError::NewFrame = e {
+            if batch.encode((msg, &frame)).is_ok() {
+                if !self.batching || msg.is_express() {
+                    self.s_out.move_batch(batch);
+                } else {
+                    let bytes = batch.len();
+                    c_guard.batch = Some(batch);
+                    drop(c_guard);
+                    self.s_out.notify(bytes);
+                }
+                return true;
+            }
+        }
+
+        if !batch.is_empty() {
+            // Move out existing batch, try to get a fresh one
+            self.s_out.move_batch(batch);
+            batch = match c_guard.batch.take() {
+                Some(batch) => batch,
+                None => match self.s_ref.pull() {
+                    Some(mut batch) => {
+                        batch.clear();
+                        self.s_out.shared.backoff.first_write.store(
+                            LOCAL_EPOCH.elapsed().as_micros() as MicroSeconds,
+                            Ordering::Relaxed,
+                        );
+                        batch
+                    }
+                    None => {
+                        // No batch — restore SN and bail
+                        tch.sn.set(sn).unwrap();
+                        return false;
+                    }
+                },
+            };
+        }
+
+        // Attempt serialization on a fully empty batch
+        if batch.encode((msg, &frame)).is_ok() {
+            if !self.batching || msg.is_express() {
+                self.s_out.move_batch(batch);
+            } else {
+                let bytes = batch.len();
+                c_guard.batch = Some(batch);
+                drop(c_guard);
+                self.s_out.notify(bytes);
+            }
+            return true;
+        }
+
+        // Message requires fragmentation — not supported in fast path.
+        // Restore the SN and put the batch back.
+        tch.sn.set(sn).unwrap();
+        c_guard.batch = Some(batch);
+        false
+    }
+
     #[inline]
     fn push_transport_message(&mut self, msg: TransportMessage) -> bool {
         // Lock the current serialization batch.
@@ -878,6 +994,44 @@ pub(crate) struct TransmissionPipelineProducer {
 }
 
 impl TransmissionPipelineProducer {
+    /// Try to push a network message synchronously without any `.await` or `block_in_place`.
+    ///
+    /// Returns `false` if:
+    ///   - The pipeline is disabled
+    ///   - The stage_in async mutex is contended (`try_lock()` fails)
+    ///   - The batch pool has no free batches
+    ///   - The message requires fragmentation
+    ///   - The pipeline is marked congested for this priority
+    ///
+    /// Callers should fall back to the async `push_network_message` path on `false`.
+    #[inline]
+    pub(crate) fn try_push_fast(
+        &self,
+        msg: NetworkMessageRef<'_>,
+    ) -> bool {
+        if self.status.is_disabled() {
+            return false;
+        }
+
+        let (idx, priority) = if self.stage_in.len() > 1 {
+            let priority = msg.priority();
+            (priority as usize, priority)
+        } else {
+            (0, Priority::DEFAULT)
+        };
+
+        // Quick congestion check (atomic load)
+        if msg.is_droppable() && self.status.is_congested(priority) {
+            return false;
+        }
+
+        // Try the async mutex without blocking — returns None if another producer holds it
+        let Some(mut queue) = self.stage_in[idx].try_lock() else { return false; };
+
+        // Try to serialize without waiting for a batch refill
+        queue.push_nowait(msg, priority)
+    }
+
     #[inline]
     pub(crate) async fn push_network_message(
         &self,
