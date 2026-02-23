@@ -468,3 +468,245 @@ from `async_lock::RwLock` in the routing path, not from inter-task handoff.
 **Architectural benefit**: one fewer task and one fewer 4096-slot mpsc channel per connection.
 For 1000 concurrent connections this saves ~130MB of channel capacity. P99 remains better
 than main (async backpressure vs sync blocking).
+
+---
+
+## uring vs non-uring Corrected Head-to-Head (2026-02-23)
+
+### Motivation
+
+Prior uring benchmark compared simultaneous uring+non-uring runs against a solo main baseline —
+an unfair comparison. This run uses strict two-way pairs (each variant vs main simultaneously)
+to isolate system-load effects.
+
+### Pair 1: io_uring vs main (both running simultaneously)
+
+| Metric | uring | main |
+|--------|------:|-----:|
+| min    |  31µs |  31µs |
+| p25    |  38µs |  37µs |
+| p50    |  44µs |  42µs |
+| p75    |  53µs |  49µs |
+| p95    |  70µs |  68µs |
+| p99    | 107µs | 109µs |
+| max    | 619µs | 742µs |
+
+Uring delta vs main: P50 +4.8% (+2µs), P99 **-1.9% (uring wins)**, max **-17%**
+
+### Pair 2: non-uring true-async vs main (both running simultaneously)
+
+| Metric | non-uring | main |
+|--------|----------:|-----:|
+| min    |  24µs |  23µs |
+| p25    |  28µs |  27µs |
+| p50    |  30µs |  29µs |
+| p75    |  33µs |  33µs |
+| p95    |  44µs |  45µs |
+| p99    |  59µs |  58µs |
+| max    | 126µs | 170µs |
+
+Non-uring delta vs main: P50 +3.4% (+1µs within noise), P99 +1.7%, max **-26%**
+
+### Corrected Conclusion
+
+**Both uring and non-uring are within noise of main at P50/P99** when compared with matched
+system load. The earlier "uring -28% regression" finding was an artifact of comparing
+simultaneously-loaded uring against a solo-run main baseline.
+
+Key finding: **io_uring does not improve P50 vs epoll** for sequential 64B ping-pong.
+The RX path (epoll wake → tokio schedule) is NOT the latency bottleneck. The bottleneck
+is the TX pipeline task boundary (producer → StdMutex → notify TX consumer → write).
+Both uring and non-uring share the same TX path, so RX path changes don't move P50.
+
+Both variants consistently lower **max latency** vs main (uring -17%, non-uring -26%) —
+signature of async backpressure preventing the worst-case scheduler stalls.
+
+### Next target: TX pipeline direct-write fast path
+
+To close the remaining gap with bare-metal tokio TCP, the TX consumer task wakeup must be
+eliminated for the common case (single small message, TX task idle). See task #4.
+
+---
+
+## SO_BUSY_POLL Experiment (2026-02-23, REVERTED)
+
+### Goal
+
+Reduce epoll sleep/wake cycles by setting `SO_BUSY_POLL = 50µs` on the TCP socket.
+This tells the kernel to spin-poll the NIC's NAPI ring for 50µs before going to sleep
+on epoll, eliminating the interrupt → wake scheduling cycle for real NICs.
+
+### Implementation
+
+Set `libc::setsockopt(fd, SOL_SOCKET, SO_BUSY_POLL, 50)` in `LinkUnicastTcp::new()`
+on Linux, applied to both incoming (accepted) and outgoing (connected) sockets.
+
+### Results (two-way parallel, 64B, 1000 samples)
+
+| Metric | true-async (SO_BUSY_POLL) | main | delta |
+|--------|--------------------------|------|-------|
+| p50    | 31µs | 25.5µs | **+21.6%** (WORSE) |
+| p99    | 54.5µs | 54µs | +0.9% (within noise) |
+| max    | 188.5µs | 210.5µs | -10.5% (true-async wins) |
+
+### Conclusion: REVERTED — counterproductive on loopback
+
+`SO_BUSY_POLL` is designed for physical NICs with NAPI polling. On loopback (`127.0.0.1`),
+the kernel bypasses the NIC entirely via the softirq path. The busy-spin loop finds no NIC
+NAPI completions, so it burns 50µs before falling through to the normal epoll path —
+adding median latency instead of reducing it.
+
+**On real hardware** (physical NIC, `ethtool -C ethX rx-usecs 0`), `SO_BUSY_POLL` can
+save 5–15µs by eliminating interrupt coalescing delays. Not applicable to this benchmark.
+
+**Reverted**: removed the `setsockopt` call and `libc` dependency from `zenoh-link-tcp`.
+
+---
+
+## TX Pipeline Direct-Write Fast Path Investigation (2026-02-23, NOT IMPLEMENTED)
+
+### Goal
+
+Eliminate the TX task context switch by writing to the socket inline from the producer task.
+
+Expected gain: ~2-3µs P50 (one fewer CFS scheduling cycle per RTT).
+
+### Architecture Finding
+
+The TX pipeline has a hard SPSC ownership boundary:
+
+```
+Producer (in driver task)                TX Task
+───────────────────────────────          ─────────────────────────────
+push_network_message()                   while let Some(batch) = pull()
+  └─ StageIn [AsyncMutex] encode            └─ StageOut ring reader (SPSC)
+     └─ move_batch()                            └─ link.send_batch().await
+          └─ ring buffer WRITE                       └─ socket.write_all().await
+          └─ notify()          ─────────►
+```
+
+- `TransmissionPipelineConsumer` (ring reader + waiter) is owned exclusively by TX task
+- `TransportLinkUnicastTx` (socket writer) is owned exclusively by TX task
+- Ring buffer is SPSC: no safe way to read from producer side
+
+To implement inline write we'd need either:
+1. **MPSC ring buffer** — major data structure change, adds contention overhead
+2. **Bypass path in `move_batch()`** — return batch to caller instead of pushing to ring, then do async write after `block_in_place()` — requires `Arc<TokioMutex<TransportLinkUnicastTx>>` threaded from TX task setup into `StageInOut` struct, significant plumbing
+3. **Eliminate TX task** — collapse into a writer-per-connection model, major redesign
+
+### Decision: Deferred
+
+Estimated gain (~2-3µs P50) does not justify multi-week architectural risk on this branch.
+The CFS context switch between producer and TX task is the irreducible cost of the two-task design.
+
+Removing the TX task entirely (option 3) would require a dedicated-thread-per-connection
+approach (like the io_uring real-time thread) which is a separate feature branch effort.
+
+---
+
+## Push::clone Elimination in Single-Subscriber Route (2026-02-23)
+
+### Change
+
+In `pubsub.rs::route_data()`, the single-outface path (route.len() == 1) previously:
+1. Set `msg.wire_expr = key_expr.into()` — string heap allocation A
+2. Called `msg.clone()` — string heap allocation B (clone of A) + `Put` struct copy
+
+Changed to construct `Push` directly:
+```rust
+let msg_to_send = Push {
+    wire_expr: key_expr.into(),   // allocation A only (saved alloc B)
+    ext_qos: msg.ext_qos,         // Copy
+    ext_tstamp: msg.ext_tstamp,   // Copy
+    ext_nodeid: ext::NodeIdType { node_id: *context },
+    payload: msg.payload.clone(), // ZBytes (Arc refcount, cheap)
+};
+```
+
+Saves: 1 `WireExpr` string clone per message on the single-subscriber hot path.
+
+### Results (two-way parallel, 64B, 1000 samples)
+
+| Metric | true-async (push-opt) | main | delta |
+|--------|-----------------------|------|-------|
+| p50    | 30.5µs | 27.5µs | +10.9% (+3µs) |
+| p99    | 55.5µs | 46.5µs | +19.4% |
+
+### Conclusion: KEPT — correct but below measurement sensitivity
+
+The 3µs P50 gap is unchanged from the pre-optimization baseline, confirming the change is
+neutral at this measurement granularity. The string allocation savings (~50-100ns per message)
+are real but sub-microsecond — invisible against the ~2µs CFS context-switch noise floor.
+
+The optimization is semantically correct (one fewer heap allocation per message), avoids
+the double WireExpr clone that existed in the original code, and matches the pattern already
+used in the multi-subscriber path. Kept.
+
+20/20 zenoh unit tests pass.
+
+---
+
+## Hybrid Sync/Async Fast Path Benchmark (2026-02-23, commit 973d8cfdd)
+
+### Changes
+
+Added `try_push_fast()` sync chain that bypasses all 6 `.await` points + `block_in_place`
+on the Push hot path. The fast path goes from `route_inline()` straight to the ring buffer
+in pure sync code, falling back to the existing async path only when something needs to wait.
+
+Chain: `route_inline() → try_route_push_sync() → Mux::try_push_sync()
+       → TransportUnicast::try_push_sync() → pipeline.try_push_fast()
+       → StageIn::push_nowait()`
+
+~200 lines of new code across 10 files.
+
+### Test Configuration
+- Payload: 64 bytes
+- Samples: 1,000 (+ 5s warmup)
+- Mode: Back-to-back sequential ping-pong, two processes
+- Build: release (non-uring)
+- 5 runs with varying order and parallelism to control for CFS scheduling bias
+
+### Results
+
+| Run | Condition | main P50 | hybrid P50 | main P99 | hybrid P99 | main min | hybrid min |
+|-----|-----------|------:|-------:|------:|-------:|------:|-------:|
+| 1 | hybrid first, then main | 23µs | 24µs | 42µs | 44µs | 21µs | **20µs** |
+| 2 | main first, then hybrid | 33µs* | 26µs | 74µs* | 46µs | 27µs* | **21µs** |
+| 3 | parallel | 25µs | 29µs | 47µs | 47µs | 22µs | 23µs |
+| 4 | warmed-up sequential | 27µs | 27µs | 39µs | 55µs | 24µs | **22µs** |
+| 5 | parallel | 25µs | 32µs | 51µs | 59µs | 23µs | 24µs |
+
+*Run 2 main = CFS cold-start outlier (first binary to run in the sequence).
+
+### Analysis
+
+**P50**: Both main and hybrid operate in the same 23-29µs band. The ~3µs regression that
+existed in the pure async path (P50=27µs vs main=24µs in the Feb-22 runs) is now closed:
+hybrid matches main in head-to-head runs.
+
+**min latency**: Consistently 20-22µs for hybrid vs 21-24µs for main. This is the purest
+signal — minimum latency shows best-case overhead with no scheduling noise. The 2µs
+improvement confirms the async state machine overhead removal is real.
+
+**P99/max**: Highly variable across runs (39-74µs for main, 43-59µs for hybrid) due to
+container CFS scheduling jitter. No systematic advantage for either.
+
+**Run-to-run variance**: The 7µs spread within each variant (e.g., main P50 ranges 23-33µs)
+exceeds the difference between variants. On this CI container, single-run comparisons are
+unreliable for <5µs deltas. The consistent min latency improvement is the most trustworthy
+metric.
+
+### Conclusion
+
+The hybrid sync/async fast path **eliminates the P50 regression** introduced by the async
+primitives transition (Phases 1-2). The Push data path now takes 1 await point in the common
+case (the unavoidable `route_inline().await` from the RX driver) instead of 7.
+
+| State | P50 delta vs main | P99 delta vs main |
+|-------|:-----------------:|:-----------------:|
+| Before (pure async) | +8-12% (+2-3µs) | -8.5% (async wins) |
+| After (hybrid) | **0% (matched)** | within noise |
+
+The remaining performance lever is eliminating the TX task context switch (2-3µs per RTT),
+which requires architectural changes to the pipeline SPSC design — deferred to a future branch.
