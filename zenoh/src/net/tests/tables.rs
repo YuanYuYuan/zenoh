@@ -12,17 +12,15 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 use std::{
-    convert::{TryFrom, TryInto},
-    sync::{Arc, Weak},
+    convert::TryInto,
+    sync::Arc,
 };
 
-use uhlc::HLC;
+use async_trait::async_trait;
 use zenoh_config::Config;
 use zenoh_core::zlock;
 use zenoh_protocol::{
-    core::{
-        key_expr::keyexpr, ExprId, Reliability, WhatAmI, WireExpr, ZenohIdProto, EMPTY_EXPR_ID,
-    },
+    core::{key_expr::keyexpr, ExprId, Region, Reliability, WhatAmI, WireExpr, EMPTY_EXPR_ID},
     network::{
         declare::queryable::ext::QueryableInfoType,
         ext::{self, NodeIdType},
@@ -40,26 +38,20 @@ use crate::{
             dispatcher::{
                 face::{Face, FaceState},
                 pubsub::SubscriberInfo,
-                tables::Tables,
+                queries::{route_query, route_send_response},
             },
-            router::*,
-            RoutingContext,
+            gateway::*,
         },
     },
 };
 
-fn new_router() -> Router {
-    let zid = ZenohIdProto::try_from([1]).unwrap();
-    let whatami = WhatAmI::Client;
-    Router::new(
-        zid,
-        whatami,
-        Some(Arc::new(HLC::default())),
-        &Config::default(),
-        #[cfg(feature = "stats")]
-        zenoh_stats::StatsRegistry::new(zid, whatami, "test"),
-    )
-    .unwrap()
+fn new_router() -> Gateway {
+    let mut config = Config::default().expanded();
+    config.set_mode(Some(WhatAmI::Client)).unwrap();
+    GatewayBuilder::new(&config)
+        .subregions(vec![Region::Local])
+        .build()
+        .unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -68,27 +60,21 @@ async fn base_test() {
     let tables = router.tables.clone();
 
     let primitives = Arc::new(DummyPrimitives {});
-    let face = Arc::downgrade(&router.new_primitives(primitives).state);
+    let face = router.new_session(primitives);
+    register_expr(&tables, &mut face.state.clone(), 1, &"one/two/three".into()).await;
+
     register_expr(
         &tables,
-        &mut face.upgrade().unwrap(),
-        1,
-        &"one/two/three".into(),
-    ).await;
-    register_expr(
-        &tables,
-        &mut face.upgrade().unwrap(),
+        &mut face.state.clone(),
         2,
         &"one/deux/trois".into(),
-    ).await;
+    )
+    .await;
 
     let sub_info = SubscriberInfo;
 
     let mut declares = vec![];
-    declare_subscription(
-        tables.hat_code.as_ref(),
-        &tables,
-        &mut face.upgrade().unwrap(),
+    face.declare_subscriber(
         0,
         &WireExpr::from(1).with_suffix("four/five"),
         &sub_info,
@@ -103,7 +89,7 @@ async fn base_test() {
     }
 
     let guard = zasyncread!(tables.tables);
-    Tables::print(&guard);
+    guard.data.print();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -167,7 +153,7 @@ async fn match_test() {
     let tables = router.tables.clone();
 
     let primitives = Arc::new(DummyPrimitives {});
-    let face = Arc::downgrade(&router.new_primitives(primitives).state);
+    let face = Arc::downgrade(&router.new_session(primitives).state);
     for (i, key_expr) in key_exprs.iter().enumerate() {
         register_expr(
             &tables,
@@ -180,7 +166,8 @@ async fn match_test() {
 
     for key_expr1 in key_exprs.iter() {
         let guard = zasyncread!(tables.tables);
-        let res_matches = Resource::get_matches(&guard, key_expr1);
+        let res_matches = Resource::get_matches(&guard.data, key_expr1);
+        drop(guard);
         dbg!(res_matches.len());
         for key_expr2 in key_exprs.iter() {
             if res_matches
@@ -201,83 +188,65 @@ async fn multisub_test() {
     let tables = router.tables.clone();
 
     let primitives = Arc::new(DummyPrimitives {});
-    let face0 = &router.new_primitives(primitives);
+    let face0 = router.new_session(primitives);
 
     // --------------
     let sub_info = SubscriberInfo;
     let mut declares = vec![];
-    declare_subscription(
-        tables.hat_code.as_ref(),
-        &tables,
-        &mut face0.state.clone(),
-        0,
-        &"sub".into(),
-        &sub_info,
-        NodeId::default(),
-        &mut |p, m| {
-            declares.push((p.clone(), m.msg.clone()));
-        },
-    )
-    .await;
+    face0
+        .declare_subscriber(
+            0,
+            &"sub".into(),
+            &sub_info,
+            NodeId::default(),
+            &mut |p, m| {
+                declares.push((p.clone(), m.msg.clone()));
+            },
+        )
+        .await;
     for (p, msg) in declares {
         let _ = p.send_declare(msg).await;
     }
-    let optres = Resource::get_resource(zasyncread!(tables.tables)._get_root(), "sub")
+    let optres = Resource::get_resource(zasyncread!(tables.tables).data._get_root(), "sub")
         .map(|res| Arc::downgrade(&res));
     assert!(optres.is_some());
     let res = optres.unwrap();
     assert!(res.upgrade().is_some());
 
     let mut declares = vec![];
-    declare_subscription(
-        tables.hat_code.as_ref(),
-        &tables,
-        &mut face0.state.clone(),
-        1,
-        &"sub".into(),
-        &sub_info,
-        NodeId::default(),
-        &mut |p, m| {
-            declares.push((p.clone(), m.msg.clone()));
-        },
-    )
-    .await;
+    face0
+        .declare_subscriber(
+            1,
+            &"sub".into(),
+            &sub_info,
+            NodeId::default(),
+            &mut |p, m| {
+                declares.push((p.clone(), m.msg.clone()));
+            },
+        )
+        .await;
     for (p, msg) in declares {
         let _ = p.send_declare(msg).await;
     }
     assert!(res.upgrade().is_some());
 
     let mut declares = vec![];
-    undeclare_subscription(
-        tables.hat_code.as_ref(),
-        &tables,
-        &mut face0.state.clone(),
-        0,
-        &WireExpr::empty(),
-        NodeId::default(),
-        &mut |p, m| {
+    face0
+        .undeclare_subscriber(0, &WireExpr::empty(), NodeId::default(), &mut |p, m| {
             declares.push((p.clone(), m.msg.clone()));
-        },
-    )
-    .await;
+        })
+        .await;
     for (p, msg) in declares {
         let _ = p.send_declare(msg).await;
     }
     assert!(res.upgrade().is_some());
 
     let mut declares = vec![];
-    undeclare_subscription(
-        tables.hat_code.as_ref(),
-        &tables,
-        &mut face0.state.clone(),
-        1,
-        &WireExpr::empty(),
-        NodeId::default(),
-        &mut |p, m| {
+    face0
+        .undeclare_subscriber(1, &WireExpr::empty(), NodeId::default(), &mut |p, m| {
             declares.push((p.clone(), m.msg.clone()));
-        },
-    )
-    .await;
+        })
+        .await;
     for (p, msg) in declares {
         let _ = p.send_declare(msg).await;
     }
@@ -292,11 +261,11 @@ async fn clean_test() {
     let tables = router.tables.clone();
 
     let primitives = Arc::new(DummyPrimitives {});
-    let face0 = &router.new_primitives(primitives);
+    let face0 = router.new_session(primitives);
 
     // --------------
     register_expr(&tables, &mut face0.state.clone(), 1, &"todrop1".into()).await;
-    let optres1 = Resource::get_resource(zasyncread!(tables.tables)._get_root(), "todrop1")
+    let optres1 = Resource::get_resource(zasyncread!(tables.tables).data._get_root(), "todrop1")
         .map(|res| Arc::downgrade(&res));
     assert!(optres1.is_some());
     let res1 = optres1.unwrap();
@@ -309,14 +278,15 @@ async fn clean_test() {
         &"todrop1/todrop11".into(),
     )
     .await;
-    let optres2 = Resource::get_resource(zasyncread!(tables.tables)._get_root(), "todrop1/todrop11")
-        .map(|res| Arc::downgrade(&res));
+    let optres2 =
+        Resource::get_resource(zasyncread!(tables.tables).data._get_root(), "todrop1/todrop11")
+            .map(|res| Arc::downgrade(&res));
     assert!(optres2.is_some());
     let res2 = optres2.unwrap();
     assert!(res2.upgrade().is_some());
 
     register_expr(&tables, &mut face0.state.clone(), 3, &"**".into()).await;
-    let optres3 = Resource::get_resource(zasyncread!(tables.tables)._get_root(), "**")
+    let optres3 = Resource::get_resource(zasyncread!(tables.tables).data._get_root(), "**")
         .map(|res| Arc::downgrade(&res));
     assert!(optres3.is_some());
     let res3 = optres3.unwrap();
@@ -339,7 +309,7 @@ async fn clean_test() {
 
     // --------------
     register_expr(&tables, &mut face0.state.clone(), 1, &"todrop1".into()).await;
-    let optres1 = Resource::get_resource(zasyncread!(tables.tables)._get_root(), "todrop1")
+    let optres1 = Resource::get_resource(zasyncread!(tables.tables).data._get_root(), "todrop1")
         .map(|res| Arc::downgrade(&res));
     assert!(optres1.is_some());
     let res1 = optres1.unwrap();
@@ -348,65 +318,56 @@ async fn clean_test() {
     let sub_info = SubscriberInfo;
 
     let mut declares = vec![];
-    declare_subscription(
-        tables.hat_code.as_ref(),
-        &tables,
-        &mut face0.state.clone(),
-        0,
-        &"todrop1/todrop11".into(),
-        &sub_info,
-        NodeId::default(),
-        &mut |p, m| {
-            declares.push((p.clone(), m.msg.clone()));
-        },
-    )
-    .await;
+    face0
+        .declare_subscriber(
+            0,
+            &"todrop1/todrop11".into(),
+            &sub_info,
+            NodeId::default(),
+            &mut |p, m| {
+                declares.push((p.clone(), m.msg.clone()));
+            },
+        )
+        .await;
     for (p, msg) in declares {
         let _ = p.send_declare(msg).await;
     }
-    let optres2 = Resource::get_resource(zasyncread!(tables.tables)._get_root(), "todrop1/todrop11")
-        .map(|res| Arc::downgrade(&res));
+    let optres2 =
+        Resource::get_resource(zasyncread!(tables.tables).data._get_root(), "todrop1/todrop11")
+            .map(|res| Arc::downgrade(&res));
     assert!(optres2.is_some());
     let res2 = optres2.unwrap();
     assert!(res2.upgrade().is_some());
 
     let mut declares = vec![];
-    declare_subscription(
-        tables.hat_code.as_ref(),
-        &tables,
-        &mut face0.state.clone(),
-        1,
-        &WireExpr::from(1).with_suffix("/todrop12"),
-        &sub_info,
-        NodeId::default(),
-        &mut |p, m| {
-            declares.push((p.clone(), m.msg.clone()));
-        },
-    )
-    .await;
+    face0
+        .declare_subscriber(
+            1,
+            &WireExpr::from(1).with_suffix("/todrop12"),
+            &sub_info,
+            NodeId::default(),
+            &mut |p, m| {
+                declares.push((p.clone(), m.msg.clone()));
+            },
+        )
+        .await;
     for (p, msg) in declares {
         let _ = p.send_declare(msg).await;
     }
-    let optres3 = Resource::get_resource(zasyncread!(tables.tables)._get_root(), "todrop1/todrop12")
-        .map(|res| Arc::downgrade(&res));
+    let optres3 =
+        Resource::get_resource(zasyncread!(tables.tables).data._get_root(), "todrop1/todrop12")
+            .map(|res| Arc::downgrade(&res));
     assert!(optres3.is_some());
     let res3 = optres3.unwrap();
     println!("COUNT: {}", res3.strong_count());
     assert!(res3.upgrade().is_some());
 
     let mut declares = vec![];
-    undeclare_subscription(
-        tables.hat_code.as_ref(),
-        &tables,
-        &mut face0.state.clone(),
-        1,
-        &WireExpr::empty(),
-        NodeId::default(),
-        &mut |p, m| {
+    face0
+        .undeclare_subscriber(1, &WireExpr::empty(), NodeId::default(), &mut |p, m| {
             declares.push((p.clone(), m.msg.clone()));
-        },
-    )
-    .await;
+        })
+        .await;
     for (p, msg) in declares {
         let _ = p.send_declare(msg).await;
     }
@@ -418,18 +379,11 @@ async fn clean_test() {
     assert!(res3.upgrade().is_none());
 
     let mut declares = vec![];
-    undeclare_subscription(
-        tables.hat_code.as_ref(),
-        &tables,
-        &mut face0.state.clone(),
-        0,
-        &WireExpr::empty(),
-        NodeId::default(),
-        &mut |p, m| {
+    face0
+        .undeclare_subscriber(0, &WireExpr::empty(), NodeId::default(), &mut |p, m| {
             declares.push((p.clone(), m.msg.clone()));
-        },
-    )
-    .await;
+        })
+        .await;
     for (p, msg) in declares {
         let _ = p.send_declare(msg).await;
     }
@@ -445,41 +399,32 @@ async fn clean_test() {
     // --------------
     register_expr(&tables, &mut face0.state.clone(), 2, &"todrop3".into()).await;
     let mut declares = vec![];
-    declare_subscription(
-        tables.hat_code.as_ref(),
-        &tables,
-        &mut face0.state.clone(),
-        2,
-        &"todrop3".into(),
-        &sub_info,
-        NodeId::default(),
-        &mut |p, m| {
-            declares.push((p.clone(), m.msg.clone()));
-        },
-    )
-    .await;
+    face0
+        .declare_subscriber(
+            2,
+            &"todrop3".into(),
+            &sub_info,
+            NodeId::default(),
+            &mut |p, m| {
+                declares.push((p.clone(), m.msg.clone()));
+            },
+        )
+        .await;
     for (p, msg) in declares {
         let _ = p.send_declare(msg).await;
     }
-    let optres1 = Resource::get_resource(zasyncread!(tables.tables)._get_root(), "todrop3")
+    let optres1 = Resource::get_resource(zasyncread!(tables.tables).data._get_root(), "todrop3")
         .map(|res| Arc::downgrade(&res));
     assert!(optres1.is_some());
     let res1 = optres1.unwrap();
     assert!(res1.upgrade().is_some());
 
     let mut declares = vec![];
-    undeclare_subscription(
-        tables.hat_code.as_ref(),
-        &tables,
-        &mut face0.state.clone(),
-        2,
-        &WireExpr::empty(),
-        NodeId::default(),
-        &mut |p, m| {
+    face0
+        .undeclare_subscriber(2, &WireExpr::empty(), NodeId::default(), &mut |p, m| {
             declares.push((p.clone(), m.msg.clone()));
-        },
-    )
-    .await;
+        })
+        .await;
     for (p, msg) in declares {
         let _ = p.send_declare(msg).await;
     }
@@ -493,91 +438,83 @@ async fn clean_test() {
     register_expr(&tables, &mut face0.state.clone(), 4, &"todrop5".into()).await;
     register_expr(&tables, &mut face0.state.clone(), 5, &"todrop6".into()).await;
     let mut declares = vec![];
-    declare_subscription(
-        tables.hat_code.as_ref(),
-        &tables,
-        &mut face0.state.clone(),
-        3,
-        &WireExpr::from(4),
-        &sub_info,
-        NodeId::default(),
-        &mut |p, m| {
-            declares.push((p.clone(), m.msg.clone()));
-        },
-    )
-    .await;
+    face0
+        .declare_subscriber(
+            3,
+            &WireExpr::from(4),
+            &sub_info,
+            NodeId::default(),
+            &mut |p, m| {
+                declares.push((p.clone(), m.msg.clone()));
+            },
+        )
+        .await;
     for (p, msg) in declares {
         let _ = p.send_declare(msg).await;
     }
     let mut declares = vec![];
-    declare_subscription(
-        tables.hat_code.as_ref(),
-        &tables,
-        &mut face0.state.clone(),
-        4,
-        &"todrop7".into(),
-        &sub_info,
-        NodeId::default(),
-        &mut |p, m| {
-            declares.push((p.clone(), m.msg.clone()));
-        },
-    )
-    .await;
+    face0
+        .declare_subscriber(
+            4,
+            &"todrop7".into(),
+            &sub_info,
+            NodeId::default(),
+            &mut |p, m| {
+                declares.push((p.clone(), m.msg.clone()));
+            },
+        )
+        .await;
     for (p, msg) in declares {
         let _ = p.send_declare(msg).await;
     }
-    declare_token(
-        tables.hat_code.as_ref(),
-        &tables,
-        &mut face0.state.clone(),
-        5,
-        &WireExpr::from(4),
-        NodeId::default(),
-        None,
-        &mut |p, m| {
-            let p = p.clone();
-            let msg = m.msg.clone();
-            tokio::spawn(async move {
-                let _ = p.send_declare(msg).await;
-            });
-        },
-    )
-    .await;
-    declare_token(
-        tables.hat_code.as_ref(),
-        &tables,
-        &mut face0.state.clone(),
-        4,
-        &"todrop8".into(),
-        NodeId::default(),
-        None,
-        &mut |p, m| {
-            let p = p.clone();
-            let msg = m.msg.clone();
-            tokio::spawn(async move {
-                let _ = p.send_declare(msg).await;
-            });
-        },
-    )
-    .await;
+    let mut declares = vec![];
+    face0
+        .declare_token(
+            5,
+            &WireExpr::from(4),
+            NodeId::default(),
+            None,
+            &mut |p, m| {
+                declares.push((p.clone(), m.msg.clone()));
+            },
+        )
+        .await;
+    for (p, msg) in declares {
+        let _ = p.send_declare(msg).await;
+    }
+    let mut declares = vec![];
+    face0
+        .declare_token(
+            4,
+            &"todrop8".into(),
+            NodeId::default(),
+            None,
+            &mut |p, m| {
+                declares.push((p.clone(), m.msg.clone()));
+            },
+        )
+        .await;
+    for (p, msg) in declares {
+        let _ = p.send_declare(msg).await;
+    }
 
-    let optres1 = Resource::get_resource(zasyncread!(tables.tables)._get_root(), "todrop4")
+    let optres1 = Resource::get_resource(zasyncread!(tables.tables).data._get_root(), "todrop4")
         .map(|res| Arc::downgrade(&res));
     assert!(optres1.is_some());
     let res1 = optres1.unwrap();
-    let optres2 = Resource::get_resource(zasyncread!(tables.tables)._get_root(), "todrop5")
+    let optres2 = Resource::get_resource(zasyncread!(tables.tables).data._get_root(), "todrop5")
         .map(|res| Arc::downgrade(&res));
     assert!(optres2.is_some());
     let res2 = optres2.unwrap();
-    let optres3 = Resource::get_resource(zasyncread!(tables.tables)._get_root(), "todrop6")
+    let optres3 = Resource::get_resource(zasyncread!(tables.tables).data._get_root(), "todrop6")
         .map(|res| Arc::downgrade(&res));
     assert!(optres3.is_some());
     let res3 = optres3.unwrap();
-    let optres4 = Resource::get_resource(zasyncread!(tables.tables)._get_root(), "todrop7")
+    let optres4 = Resource::get_resource(zasyncread!(tables.tables).data._get_root(), "todrop7")
         .map(|res| Arc::downgrade(&res));
     assert!(optres4.is_some());
     let res4 = optres4.unwrap();
-    let optres5 = Resource::get_resource(zasyncread!(tables.tables)._get_root(), "todrop8")
+    let optres5 = Resource::get_resource(zasyncread!(tables.tables).data._get_root(), "todrop8")
         .map(|res| Arc::downgrade(&res));
     assert!(optres5.is_some());
     let res5 = optres5.unwrap();
@@ -647,7 +584,7 @@ impl ClientPrimitives {
     }
 }
 
-#[async_trait::async_trait]
+#[async_trait]
 impl Primitives for ClientPrimitives {
     async fn send_interest(&self, _msg: zenoh_protocol::network::Interest) -> bool {
         false
@@ -698,10 +635,10 @@ async fn test_response_wireexpr() {
     let router = new_router();
     let tables = router.tables.clone();
     let primitives0 = Arc::new(ClientPrimitives::new());
-    let face0 = Arc::downgrade(&router.new_primitives(primitives0.clone()).state);
+    let face0 = router.new_session(primitives0.clone());
 
     let primitives1 = Arc::new(ClientPrimitives::new());
-    let face1 = Arc::downgrade(&router.new_primitives(primitives1.clone()).state);
+    let face1 = router.new_session(primitives1.clone());
 
     let qinfo = QueryableInfoType {
         complete: true,
@@ -709,10 +646,11 @@ async fn test_response_wireexpr() {
     };
     register_expr(
         &tables,
-        &mut face0.upgrade().unwrap(),
+        &mut face0.state.clone(),
         11,
         &"test/queryable/reply".into(),
-    ).await;
+    )
+    .await;
 
     Primitives::send_declare(
         primitives0.as_ref(),
@@ -731,10 +669,11 @@ async fn test_response_wireexpr() {
 
     register_expr(
         &tables,
-        &mut face1.upgrade().unwrap(),
+        &mut face1.state.clone(),
         12,
         &"test/queryable".into(),
-    ).await;
+    )
+    .await;
 
     Primitives::send_declare(
         primitives1.as_ref(),
@@ -748,29 +687,28 @@ async fn test_response_wireexpr() {
                 wire_expr: "test/queryable".into(),
             }),
         },
-    ).await;
-
-    declare_queryable(
-        tables.hat_code.as_ref(),
-        &tables,
-        &mut face0.upgrade().unwrap(),
-        0,
-        &WireExpr::from(11).with_suffix("/**"),
-        &qinfo,
-        NodeId::default(),
-        &mut |p, m| {
-            let p = p.clone();
-            let msg = m.msg.clone();
-            tokio::spawn(async move {
-                let _ = p.send_declare(msg).await;
-            });
-        },
     )
     .await;
 
+    let mut declares = vec![];
+    face0
+        .declare_queryable(
+            0,
+            &WireExpr::from(11).with_suffix("/**"),
+            &qinfo,
+            NodeId::default(),
+            &mut |p, m| {
+                declares.push((p.clone(), m.msg.clone()));
+            },
+        )
+        .await;
+    for (p, msg) in declares {
+        let _ = p.send_declare(msg).await;
+    }
+
     route_query(
         &tables,
-        &face1.upgrade().unwrap(),
+        &face1.state,
         &mut Request {
             id: 1,
             wire_expr: "test/queryable/reply/*".into(),
@@ -782,11 +720,12 @@ async fn test_response_wireexpr() {
             ext_budget: None,
             ext_timeout: None,
         },
-    ).await;
+    )
+    .await;
 
     route_send_response(
         &tables,
-        &mut face0.upgrade().unwrap(),
+        &mut face0.state.clone(),
         &mut Response {
             rid: 1,
             wire_expr: WireExpr {
@@ -803,18 +742,22 @@ async fn test_response_wireexpr() {
             ext_tstamp: None,
             ext_respid: None,
         },
-    ).await;
+    )
+    .await;
     assert_eq!(
         primitives1.get_last_name().unwrap(),
         "test/queryable/reply/1"
     );
     let we = primitives1.get_last_key().unwrap();
-    assert_eq!(we.suffix, "/reply/1");
+    // TODO: replace asserts with the ones commented below once optimization of reply wireexpr in route_send_response is enabled
+    assert_eq!(we.suffix, "test/queryable/reply/1");
+    assert_eq!(we.scope, 0);
+    /*assert_eq!(we.suffix, "/reply/1");
     assert_eq!(we.scope, 12);
-    assert_eq!(we.mapping, Mapping::Receiver);
+    assert_eq!(we.mapping, Mapping::Receiver);*/
 
     // unregister receiver mapping and validate that we is still correct
-    unregister_expr(&tables, &mut face1.upgrade().unwrap(), 12).await;
+    unregister_expr(&tables, &mut face1.state.clone(), 12).await;
 
     Primitives::send_declare(
         primitives1.as_ref(),
@@ -825,11 +768,12 @@ async fn test_response_wireexpr() {
             ext_nodeid: ext::NodeIdType::DEFAULT,
             body: DeclareBody::UndeclareKeyExpr(UndeclareKeyExpr { id: 12 }),
         },
-    ).await;
+    )
+    .await;
 
     route_send_response(
         &tables,
-        &mut face0.upgrade().unwrap(),
+        &mut face0.state.clone(),
         &mut Response {
             rid: 1,
             wire_expr: WireExpr {
@@ -846,7 +790,8 @@ async fn test_response_wireexpr() {
             ext_tstamp: None,
             ext_respid: None,
         },
-    ).await;
+    )
+    .await;
     assert_eq!(
         primitives1.get_last_name().unwrap(),
         "test/queryable/reply/1"
@@ -864,13 +809,8 @@ async fn client_test() {
     let sub_info = SubscriberInfo;
 
     let primitives0 = Arc::new(ClientPrimitives::new());
-    let face0 = Arc::downgrade(&router.new_primitives(primitives0.clone()).state);
-    register_expr(
-        &tables,
-        &mut face0.upgrade().unwrap(),
-        11,
-        &"test/client".into(),
-    ).await;
+    let face0 = router.new_session(primitives0.clone());
+    register_expr(&tables, &mut face0.state.clone(), 11, &"test/client".into()).await;
     Primitives::send_declare(
         primitives0.as_ref(),
         Declare {
@@ -883,30 +823,30 @@ async fn client_test() {
                 wire_expr: "test/client".into(),
             }),
         },
-    ).await;
-    let mut declares = vec![];
-    declare_subscription(
-        tables.hat_code.as_ref(),
-        &tables,
-        &mut face0.upgrade().unwrap(),
-        0,
-        &WireExpr::from(11).with_suffix("/**"),
-        &sub_info,
-        NodeId::default(),
-        &mut |p, m| {
-            declares.push((p.clone(), m.msg.clone()));
-        },
     )
     .await;
+    let mut declares = vec![];
+    face0
+        .declare_subscriber(
+            0,
+            &WireExpr::from(11).with_suffix("/**"),
+            &sub_info,
+            NodeId::default(),
+            &mut |p, m| {
+                declares.push((p.clone(), m.msg.clone()));
+            },
+        )
+        .await;
     for (p, msg) in declares {
         let _ = p.send_declare(msg).await;
     }
     register_expr(
         &tables,
-        &mut face0.upgrade().unwrap(),
+        &mut face0.state.clone(),
         12,
         &WireExpr::from(11).with_suffix("/z1_pub1"),
-    ).await;
+    )
+    .await;
     Primitives::send_declare(
         primitives0.as_ref(),
         Declare {
@@ -919,16 +859,12 @@ async fn client_test() {
                 wire_expr: WireExpr::from(11).with_suffix("/z1_pub1"),
             }),
         },
-    ).await;
+    )
+    .await;
 
     let primitives1 = Arc::new(ClientPrimitives::new());
-    let face1 = Arc::downgrade(&router.new_primitives(primitives1.clone()).state);
-    register_expr(
-        &tables,
-        &mut face1.upgrade().unwrap(),
-        21,
-        &"test/client".into(),
-    ).await;
+    let face1 = router.new_session(primitives1.clone());
+    register_expr(&tables, &mut face1.state.clone(), 21, &"test/client".into()).await;
     Primitives::send_declare(
         primitives1.as_ref(),
         Declare {
@@ -941,30 +877,30 @@ async fn client_test() {
                 wire_expr: "test/client".into(),
             }),
         },
-    ).await;
-    let mut declares = vec![];
-    declare_subscription(
-        tables.hat_code.as_ref(),
-        &tables,
-        &mut face1.upgrade().unwrap(),
-        0,
-        &WireExpr::from(21).with_suffix("/**"),
-        &sub_info,
-        NodeId::default(),
-        &mut |p, m| {
-            declares.push((p.clone(), m.msg.clone()));
-        },
     )
     .await;
+    let mut declares = vec![];
+    face1
+        .declare_subscriber(
+            0,
+            &WireExpr::from(21).with_suffix("/**"),
+            &sub_info,
+            NodeId::default(),
+            &mut |p, m| {
+                declares.push((p.clone(), m.msg.clone()));
+            },
+        )
+        .await;
     for (p, msg) in declares {
         let _ = p.send_declare(msg).await;
     }
     register_expr(
         &tables,
-        &mut face1.upgrade().unwrap(),
+        &mut face1.state.clone(),
         22,
         &WireExpr::from(21).with_suffix("/z2_pub1"),
-    ).await;
+    )
+    .await;
     Primitives::send_declare(
         primitives1.as_ref(),
         Declare {
@@ -977,16 +913,12 @@ async fn client_test() {
                 wire_expr: WireExpr::from(21).with_suffix("/z2_pub1"),
             }),
         },
-    ).await;
+    )
+    .await;
 
     let primitives2 = Arc::new(ClientPrimitives::new());
-    let face2 = Arc::downgrade(&router.new_primitives(primitives2.clone()).state);
-    register_expr(
-        &tables,
-        &mut face2.upgrade().unwrap(),
-        31,
-        &"test/client".into(),
-    ).await;
+    let face2 = router.new_session(primitives2.clone());
+    register_expr(&tables, &mut face2.state.clone(), 31, &"test/client".into()).await;
     Primitives::send_declare(
         primitives2.as_ref(),
         Declare {
@@ -999,21 +931,20 @@ async fn client_test() {
                 wire_expr: "test/client".into(),
             }),
         },
-    ).await;
-    let mut declares = vec![];
-    declare_subscription(
-        tables.hat_code.as_ref(),
-        &tables,
-        &mut face2.upgrade().unwrap(),
-        0,
-        &WireExpr::from(31).with_suffix("/**"),
-        &sub_info,
-        NodeId::default(),
-        &mut |p, m| {
-            declares.push((p.clone(), m.msg.clone()));
-        },
     )
     .await;
+    let mut declares = vec![];
+    face2
+        .declare_subscriber(
+            0,
+            &WireExpr::from(31).with_suffix("/**"),
+            &sub_info,
+            NodeId::default(),
+            &mut |p, m| {
+                declares.push((p.clone(), m.msg.clone()));
+            },
+        )
+        .await;
     for (p, msg) in declares {
         let _ = p.send_declare(msg).await;
     }
@@ -1022,22 +953,24 @@ async fn client_test() {
     primitives1.clear_data();
     primitives2.clear_data();
 
-    let route_dummy_data = |face: Weak<FaceState>, wire_expr| {
+    let route_dummy_data = |face: Arc<FaceState>, wire_expr| {
         let tables = tables.clone();
         async move {
             route_data(
                 &tables,
-                &face.upgrade().unwrap(),
+                &face,
                 &mut Push {
                     wire_expr,
                     ..Put::default().into()
                 },
                 Reliability::Reliable,
-            ).await;
+                true,
+            )
+            .await;
         }
     };
 
-    route_dummy_data(face0.clone(), "test/client/z1_wr1".into()).await;
+    route_dummy_data(face0.state.clone(), "test/client/z1_wr1".into()).await;
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     // functional check
@@ -1055,7 +988,7 @@ async fn client_test() {
     primitives0.clear_data();
     primitives1.clear_data();
     primitives2.clear_data();
-    route_dummy_data(face0.clone(), WireExpr::from(11).with_suffix("/z1_wr2")).await;
+    route_dummy_data(face0.state.clone(), WireExpr::from(11).with_suffix("/z1_wr2")).await;
 
     // functional check
     assert!(primitives1.get_last_name().is_some());
@@ -1072,7 +1005,7 @@ async fn client_test() {
     primitives0.clear_data();
     primitives1.clear_data();
     primitives2.clear_data();
-    route_dummy_data(face1.clone(), "test/client/**".into()).await;
+    route_dummy_data(face1.state.clone(), "test/client/**".into()).await;
 
     // functional check
     assert!(primitives0.get_last_name().is_some());
@@ -1089,7 +1022,7 @@ async fn client_test() {
     primitives0.clear_data();
     primitives1.clear_data();
     primitives2.clear_data();
-    route_dummy_data(face0.clone(), 12.into()).await;
+    route_dummy_data(face0.state.clone(), 12.into()).await;
 
     // functional check
     assert!(primitives1.get_last_name().is_some());
@@ -1106,7 +1039,7 @@ async fn client_test() {
     primitives0.clear_data();
     primitives1.clear_data();
     primitives2.clear_data();
-    route_dummy_data(face1.clone(), 22.into()).await;
+    route_dummy_data(face1.state.clone(), 22.into()).await;
 
     // functional check
     assert!(primitives0.get_last_name().is_some());
@@ -1126,21 +1059,21 @@ async fn get_best_key_test() {
     let router = new_router();
 
     let primitives = Arc::new(DummyPrimitives {});
-    let face1 = router.new_primitives(primitives.clone());
-    let face2 = router.new_primitives(primitives.clone());
-    let face3 = router.new_primitives(primitives);
+    let face1 = router.new_session(primitives.clone());
+    let face2 = router.new_session(primitives.clone());
+    let face3 = router.new_session(primitives);
 
-    let root = zasyncread!(router.tables.tables)._get_root().clone();
-    let get_best_key = |resource, suffix, face: &Face| {
+    let root = zasyncread!(router.tables.tables).data._get_root().clone();
+    let get_best_key = |resource, suffix, face: &Arc<Face>| {
         Resource::get_resource(&root, resource)
             .unwrap()
             .get_best_key(suffix, face.state.id)
     };
 
-    crate::net::routing::dispatcher::resource::register_expr(&router.tables, &mut face1.state.clone(), 1, &"a".into()).await;
-    crate::net::routing::dispatcher::resource::register_expr(&router.tables, &mut face2.state.clone(), 2, &"a/b".into()).await;
-    crate::net::routing::dispatcher::resource::register_expr(&router.tables, &mut face2.state.clone(), 3, &"a/b/c".into()).await;
-    crate::net::routing::dispatcher::resource::register_expr(&router.tables, &mut face3.state.clone(), 4, &"a/d".into()).await;
+    register_expr(&router.tables, &mut face1.state.clone(), 1, &"a".into()).await;
+    register_expr(&router.tables, &mut face2.state.clone(), 2, &"a/b".into()).await;
+    register_expr(&router.tables, &mut face2.state.clone(), 3, &"a/b/c".into()).await;
+    register_expr(&router.tables, &mut face3.state.clone(), 4, &"a/d".into()).await;
 
     macro_rules! assert_wire_expr {
         ($key:expr, {scope: $scope:expr, suffix: $suffix:expr}) => {
@@ -1169,9 +1102,9 @@ async fn big_key_expr() {
     let router = new_router();
 
     let primitives = Arc::new(DummyPrimitives {});
-    let face = router.new_primitives(primitives.clone());
+    let face = router.new_session(primitives.clone());
 
-    let root = zasyncread!(router.tables.tables)._get_root().clone();
+    let root = zasyncread!(router.tables.tables).data._get_root().clone();
     let key_expr = KeyExpr::new(vec!["a/"; 10000].concat() + "a").unwrap();
     let wire_expr = WireExpr::from(&**key_expr);
     register_expr(&router.tables, &mut face.state.clone(), 1, &wire_expr).await;
@@ -1179,5 +1112,5 @@ async fn big_key_expr() {
     root.get_best_key(&key_expr, face.state.id);
     res.get_best_key("/a", face.state.id + 1);
     let guard = face.tables.tables.read().await;
-    Resource::get_matches(&guard, &key_expr);
+    Resource::get_matches(&guard.data, &key_expr);
 }

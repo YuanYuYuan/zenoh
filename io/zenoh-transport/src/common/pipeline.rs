@@ -1538,13 +1538,13 @@ mod tests {
 
             let c_producer = producer.clone();
             let c_counter = counter.clone();
-            let h1 = task::spawn_blocking(move || {
-                schedule(c_producer, c_counter, 1);
+            let h1 = tokio::task::spawn(async move {
+                schedule(c_producer, c_counter, 1).await;
             });
 
             let c_counter = counter.clone();
-            let h2 = task::spawn_blocking(move || {
-                schedule(producer, c_counter, 2);
+            let h2 = tokio::task::spawn(async move {
+                schedule(producer, c_counter, 2).await;
             });
 
             // Wait to have sent enough messages and to have blocked
@@ -1668,7 +1668,7 @@ mod tests {
                 println!("{} bytes: {:.6} Gbps", current, 2.0 * thr);
             }
             prev_size = current;
-            async_io::Timer::after(Duration::from_millis(500)).await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
 

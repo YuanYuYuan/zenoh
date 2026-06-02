@@ -2900,12 +2900,12 @@ async fn test_multi_rx_transport(
     };
     let mut network_msg = NetworkMessage::from(message.clone());
     network_msg.reliability = msg1_qos.1;
-    client_transport.schedule(network_msg.as_mut()).unwrap();
+    client_transport.schedule(network_msg.as_mut()).await.unwrap();
 
     message.ext_qos = QoSType::new(msg2_qos.0, CongestionControl::Drop, false);
     let mut network_msg = NetworkMessage::from(message.clone());
     network_msg.reliability = msg2_qos.1;
-    client_transport.schedule(network_msg.as_mut()).unwrap();
+    client_transport.schedule(network_msg.as_mut()).await.unwrap();
 
     tokio::time::sleep(Duration::from_secs(1)).await;
 
