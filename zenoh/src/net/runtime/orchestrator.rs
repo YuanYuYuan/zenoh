@@ -1329,8 +1329,8 @@ impl Runtime {
     #[allow(dead_code)]
     pub(crate) fn update_network(&self) -> ZResult<()> {
         let router = self.router();
-        let _ctrl_lock = zlock!(router.tables.ctrl_lock);
-        let mut wtables = zwrite!(router.tables.tables);
+        let _ctrl_lock = router.tables.ctrl_lock.lock_blocking();
+        let mut wtables = router.tables.tables.write_blocking();
         let tables = &mut *wtables;
         for hat in tables.hats.values_mut() {
             hat.update_from_config(&router.tables, self)?;
@@ -1340,7 +1340,7 @@ impl Runtime {
 
     pub(crate) fn get_links_info(&self) -> HashMap<ZenohIdProto, LinkInfo> {
         let router = self.router();
-        let tables = zread!(router.tables.tables);
+        let tables = router.tables.tables.read_blocking();
         tables
             .hats
             .values()

@@ -38,8 +38,8 @@ use crate::{
     common::{
         batch::{BatchConfig, RBatch},
         pipeline::{
-            TransmissionPipeline, TransmissionPipelineConf, TransmissionPipelineConsumer,
-            TransmissionPipelineProducer,
+            PipelineConsumer, TransmissionPipeline, TransmissionPipelineConf,
+            TransmissionPipelineConsumer, TransmissionPipelineProducer,
         },
         priority::TransportPriorityTx,
     },
@@ -91,7 +91,8 @@ impl TransportLinkUnicastUniversal {
         };
 
         // The pipeline
-        let (producer, consumer) = TransmissionPipeline::make(config, priority_tx);
+        let link_supports_priority = link.config.priorities.is_some();
+        let (producer, consumer) = TransmissionPipeline::make(config, priority_tx, link_supports_priority);
 
         #[cfg(feature = "stats")]
         let stats = transport
@@ -224,7 +225,7 @@ async fn tx_task(
             res = tokio::time::timeout(keep_alive, pipeline.pull()) => {
                 match res {
                     Ok(Some((mut batch, priority))) => {
-                        link.send_batch(&mut batch).await?;
+                        link.send_batch(&mut batch, Some(priority)).await?;
 
                         #[cfg(feature = "stats")]
                         {
@@ -245,7 +246,7 @@ async fn tx_task(
                         let message: TransportMessage = KeepAlive.into();
 
                         #[allow(unused_variables)] // Used when stats feature is enabled
-                        let n = link.send(&message).await?;
+                        let n = link.send(&message, None).await?;
 
                         #[cfg(feature = "stats")]
                         {
@@ -263,7 +264,7 @@ async fn tx_task(
     // Drain the transmission pipeline and write remaining bytes on the wire
     let mut batches = pipeline.drain();
     for (mut b, _) in batches.drain(..) {
-        tokio::time::timeout(keep_alive, link.send_batch(&mut b))
+        tokio::time::timeout(keep_alive, link.send_batch(&mut b, None))
             .await
             .map_err(|_| zerror!("{}: flush failed after {} ms", link, keep_alive.as_millis()))??;
 
@@ -350,7 +351,7 @@ async fn rx_task_non_uring(
         RecyclingObject<T>: AsMut<[u8]> + ZSliceBuffer,
     {
         let batch = link
-            .recv_batch(|| pool.try_take().unwrap_or_else(|| pool.alloc()))
+            .recv_batch(|| pool.try_take().unwrap_or_else(|| pool.alloc()), None)
             .await?;
         Ok(batch)
     }

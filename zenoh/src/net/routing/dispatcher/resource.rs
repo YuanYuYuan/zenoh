@@ -29,7 +29,7 @@ use zenoh_protocol::{
     core::{key_expr::keyexpr, ExprId, Region, WireExpr},
     network::{
         self,
-        declare::{self, queryable::ext::QueryableInfoType, Declare, DeclareBody, DeclareKeyExpr},
+        declare::{self, ext, queryable::ext::QueryableInfoType, Declare, DeclareBody, DeclareKeyExpr},
         interest::InterestId,
         Mapping, RequestId,
     },
@@ -233,7 +233,7 @@ pub type RoutesVersion = u64;
 /// 2. Routes depend on the source node id for router hats. In a `R1 - R - R2` topology, R would
 ///    route a message to R1 only if it originates in R2 and vice-versa.
 #[derive(Clone)]
-pub(crate) struct Routes<T> {
+pub(crate) struct Routes<T: Clone> {
     /// Mapping from **source** [`Region`] and [`NodeId`] to data/query routes.
     mapping: RegionMap<NodeIdMap<T>>,
     version: u64,
@@ -241,7 +241,7 @@ pub(crate) struct Routes<T> {
 
 pub(crate) type NodeIdMap<T> = Vec<Option<T>>;
 
-impl<T> Default for Routes<T> {
+impl<T: Clone> Default for Routes<T> {
     fn default() -> Self {
         Self {
             mapping: RegionMap::default(),
@@ -250,7 +250,7 @@ impl<T> Default for Routes<T> {
     }
 }
 
-impl<T> Routes<T> {
+impl<T: Clone> Routes<T> {
     pub(crate) fn clear(&mut self) {
         self.mapping.clear();
     }
@@ -991,7 +991,7 @@ pub(crate) async fn register_expr<'a>(
             None => {
                 let res = Resource::get_resource(&prefix, &expr.suffix);
                 let (mut res, mut wtables) =
-                    if res.as_ref().map(|r| r.context.is_some()).unwrap_or(false) {
+                    if res.as_ref().map(|r| r.ctx.is_some()).unwrap_or(false) {
                         drop(rtables);
                         let wtables = zasyncwrite!(tables.tables);
                         (res.unwrap(), wtables)
@@ -999,18 +999,17 @@ pub(crate) async fn register_expr<'a>(
                         let mut fullexpr = prefix.expr().to_string();
                         fullexpr.push_str(expr.suffix.as_ref());
                         let mut matches = keyexpr::new(fullexpr.as_str())
-                            .map(|ke| Resource::get_matches(&rtables, ke))
+                            .map(|ke| Resource::get_matches(&rtables.data, ke))
                             .unwrap_or_default();
                         drop(rtables);
                         let mut wtables = zasyncwrite!(tables.tables);
                         let mut res = Resource::make_resource(
-                            tables.hat_code.as_ref(),
-                            &mut wtables,
+                            &mut *wtables,
                             &mut prefix,
                             expr.suffix.as_ref(),
                         );
                         matches.push(Arc::downgrade(&res));
-                        Resource::match_resource(&wtables, &mut res, matches);
+                        Resource::match_resource(&wtables.data, &mut res, matches);
                         (res, wtables)
                     };
                 let ctx = get_mut_unchecked(&mut res)
@@ -1050,8 +1049,13 @@ pub(crate) async fn unregister_expr(tables: &TablesLock, face: &mut Arc<FaceStat
             if let Some(ctx) = get_mut_unchecked(&mut res).face_ctxs.get_mut(&face.id) {
                 get_mut_unchecked(ctx).remote_expr_id = None;
             }
-            hats[region].disable_data_routes(&mut res);
-            hats[region].disable_query_routes(&mut res);
+            {
+                let tables = &mut *wtables;
+                let hats = &mut tables.hats;
+                let region = face.region;
+                hats[region].disable_data_routes(&mut res);
+                hats[region].disable_query_routes(&mut res);
+            }
             face.update_interceptors_caches(&mut res);
             Resource::clean(&mut res);
         }
@@ -1089,8 +1093,7 @@ pub(crate) async fn register_expr_interest<'a>(
                     drop(rtables);
                     let mut wtables = zasyncwrite!(tables.tables);
                     let mut res = Resource::make_resource(
-                        tables.hat_code.as_ref(),
-                        &mut wtables,
+                        &mut *wtables,
                         &mut prefix,
                         expr.suffix.as_ref(),
                     );

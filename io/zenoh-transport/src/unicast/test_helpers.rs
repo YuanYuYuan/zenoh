@@ -17,8 +17,8 @@ use std::{
     time::Duration,
 };
 
+use async_lock::MutexGuard as AsyncMutexGuard;
 use async_trait::async_trait;
-use tokio::sync::MutexGuard as AsyncMutexGuard;
 use zenoh_core::zcondfeat;
 use zenoh_link::Link;
 use zenoh_protocol::{
@@ -123,7 +123,7 @@ impl TransportUnicastTrait for MockTransportUnicastInner {
         unimplemented!("MockTransportUnicastInner::add_link")
     }
 
-    fn schedule(&self, msg: NetworkMessageMut) -> ZResult<bool> {
+    async fn schedule(&self, msg: NetworkMessageMut<'_>) -> ZResult<bool> {
         let body = match msg.body {
             NetworkBodyMut::Push(p) => NetworkBody::Push(p.clone()),
             NetworkBodyMut::Request(r) => NetworkBody::Request(r.clone()),

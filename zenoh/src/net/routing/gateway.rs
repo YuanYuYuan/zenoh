@@ -13,8 +13,10 @@
 //
 use std::{
     str::FromStr,
-    sync::{atomic::Ordering, Arc, Mutex, RwLock},
+    sync::{atomic::Ordering, Arc},
 };
+
+use async_lock::{Mutex, RwLock};
 
 use arc_swap::ArcSwapOption;
 use uhlc::HLC;
@@ -205,8 +207,8 @@ pub struct Gateway {
 
 impl Gateway {
     pub fn init_hats(&mut self, runtime: Runtime) -> ZResult<()> {
-        let _ctrl_lock = zlock!(self.tables.ctrl_lock);
-        let mut wtables = zwrite!(self.tables.tables);
+        let _ctrl_lock = self.tables.ctrl_lock.lock_blocking();
+        let mut wtables = self.tables.tables.write_blocking();
         let tables = &mut *wtables;
         tables.data.runtime = Some(Runtime::downgrade(&runtime));
 
@@ -218,8 +220,8 @@ impl Gateway {
     }
 
     pub(crate) fn new_session(&self, primitives: Arc<dyn EPrimitives + Send + Sync>) -> Arc<Face> {
-        let ctrl_lock = zlock!(self.tables.ctrl_lock);
-        let mut wtables = zwrite!(self.tables.tables);
+        let ctrl_lock = self.tables.ctrl_lock.lock_blocking();
+        let mut wtables = self.tables.tables.write_blocking();
         let tables = &mut *wtables;
 
         let newface = Arc::new(
@@ -267,8 +269,8 @@ impl Gateway {
         region: Region,
         remote_bound: Bound,
     ) -> ZResult<Arc<DeMux>> {
-        let ctrl_lock = zlock!(self.tables.ctrl_lock);
-        let mut wtables = zwrite!(self.tables.tables);
+        let ctrl_lock = self.tables.ctrl_lock.lock_blocking();
+        let mut wtables = self.tables.tables.write_blocking();
         let tables = &mut *wtables;
 
         let whatami = transport.get_whatami()?;
@@ -312,7 +314,10 @@ impl Gateway {
 
         let _ = mux.face.set(Face::downgrade(&face));
 
-        let mut declares = vec![];
+        let mut declares: Vec<(
+            Arc<dyn crate::net::primitives::Primitives + Send + Sync>,
+            crate::net::routing::RoutingContext<zenoh_protocol::network::Declare>,
+        )> = vec![];
         let (owner_hat, other_hats) = tables
             .hats
             .partition_mut(&region)
@@ -331,7 +336,7 @@ impl Gateway {
         drop(wtables);
         drop(ctrl_lock);
         for (p, m) in declares {
-            m.with_mut(|m| p.send_declare(m));
+            tokio::spawn(async move { p.send_declare(m.msg).await });
         }
 
         Ok(Arc::new(DeMux::new(
@@ -347,8 +352,8 @@ impl Gateway {
         transport: TransportMulticast,
         region: Region,
     ) -> ZResult<()> {
-        let _ctrl_lock = zlock!(self.tables.ctrl_lock);
-        let mut wtables = zwrite!(self.tables.tables);
+        let _ctrl_lock = self.tables.ctrl_lock.lock_blocking();
+        let mut wtables = self.tables.tables.write_blocking();
         let tables = &mut *wtables;
 
         let fid = tables.data.new_face_id();
@@ -401,8 +406,8 @@ impl Gateway {
         region: Region,
         remote_bound: Bound,
     ) -> ZResult<Arc<DeMux>> {
-        let _ctrl_lock = zlock!(self.tables.ctrl_lock);
-        let mut wtables = zwrite!(self.tables.tables);
+        let _ctrl_lock = self.tables.ctrl_lock.lock_blocking();
+        let mut wtables = self.tables.tables.write_blocking();
         let tables = &mut *wtables;
 
         let fid = tables.data.new_face_id();

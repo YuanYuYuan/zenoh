@@ -322,8 +322,11 @@ impl IRuntime for RuntimeState {
     }
 
     fn get_transports_blocking(&self) -> Vec<Transport> {
-        self.manager
-            .get_transports_unicast_blocking()
+        let unicast_transports = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(self.manager.get_transports_unicast())
+        });
+        unicast_transports
             .into_iter()
             .filter_map(|t| t.get_peer().ok())
             .map(|peer| Transport::new(&peer, false))
@@ -417,11 +420,11 @@ impl IRuntime for RuntimeState {
             Some(ns) => {
                 let face = self
                     .router
-                    .new_session(Arc::new(ENamespace::new(ns.clone(), e_primitives)));
+                    .new_session(Arc::new(ENamespace::new(ns.clone(), primitives)));
                 (face.state.id, Arc::new(Namespace::new(ns.clone(), face)))
             }
             None => {
-                let face = self.router.new_session(e_primitives);
+                let face = self.router.new_session(primitives);
                 (face.state.id, face)
             }
         }
@@ -1261,7 +1264,7 @@ impl Closee for Arc<RuntimeState> {
         // the task responsible for resource clean up was aborted earlier than expected.
         // This should be resolved by identifying corresponding task, and placing
         // cancellation token manually inside it.
-        let mut tables = self.router.tables.tables.write().unwrap();
+        let mut tables = self.router.tables.tables.write_blocking();
         tables.data.root_res.close();
         tables.data.faces.clear();
     }

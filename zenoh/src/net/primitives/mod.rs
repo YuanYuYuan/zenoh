@@ -98,3 +98,5 @@ impl Primitives for DummyPrimitives {
     }
 }
 
+/// Compatibility alias: EPrimitives was merged into Primitives in the true-async refactor.
+pub(crate) use Primitives as EPrimitives;

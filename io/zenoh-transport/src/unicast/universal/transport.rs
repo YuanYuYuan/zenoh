@@ -23,7 +23,7 @@ use async_lock::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard};
 use zenoh_core::{zasynclock, zcondfeat, zread, zwrite};
 use zenoh_link::Link;
 use zenoh_protocol::{
-    core::{Priority, WhatAmI, ZenohIdProto},
+    core::{Bound, Priority, RegionName, WhatAmI, ZenohIdProto},
     network::{NetworkMessageMut, NetworkMessageRef},
     transport::{close, Close, PrioritySn, TransportMessage, TransportSn},
 };
@@ -36,7 +36,7 @@ use crate::{
     unicast::{
         authentication::TransportAuthId,
         link::{LinkUnicastWithOpenAck, TransportLinkUnicastDirection},
-        transport_unicast_inner::{AddLinkResult, TransportUnicastTrait},
+        transport_unicast_inner::{AddLinkResult, TransportStatus, TransportUnicastTrait},
         universal::link::TransportLinkUnicastUniversal,
         TransportConfigUnicast,
     },
@@ -62,8 +62,8 @@ pub(crate) struct TransportUnicastUniversal {
     pub(super) links: Arc<RwLock<Box<[TransportLinkUnicastUniversal]>>>,
     // The callback — ArcSwapOption gives lock-free reads on the hot receive path
     pub(super) callback: Arc<ArcSwapOption<Arc<dyn TransportPeerEventHandler>>>,
-    // Lock used to ensure no race in add_link method
-    add_link_lock: Arc<AsyncMutex<()>>,
+    // Lock used to ensure no race in add_link method and to expose transport status
+    add_link_lock: Arc<AsyncMutex<TransportStatus>>,
     // Mutex for notification
     pub(super) alive: Arc<AsyncMutex<bool>>,
     // Transport statistics
@@ -107,7 +107,7 @@ impl TransportUnicastUniversal {
             priority_tx: priority_tx.into_boxed_slice().into(),
             priority_rx: priority_rx.into_boxed_slice().into(),
             links: Arc::new(RwLock::new(vec![].into_boxed_slice())),
-            add_link_lock: Arc::new(AsyncMutex::new(())),
+            add_link_lock: Arc::new(AsyncMutex::new(TransportStatus::Uninitialized)),
             callback: Arc::new(ArcSwapOption::from(None::<Arc<Arc<dyn TransportPeerEventHandler>>>)),
             alive: Arc::new(AsyncMutex::new(false)),
             #[cfg(feature = "stats")]
@@ -117,6 +117,10 @@ impl TransportUnicastUniversal {
         });
 
         Ok(t)
+    }
+
+    pub(crate) async fn get_alive(&self) -> AsyncMutexGuard<'_, bool> {
+        zasynclock!(self.alive)
     }
 
     /*************************************/
@@ -269,7 +273,8 @@ impl TransportUnicastTrait for TransportUnicastUniversal {
                         count,
                         limit
                     );
-                    return Err((e.into(), link.fail(), close::reason::MAX_LINKS));
+                    let (link_main, link_assoc) = link.fail();
+                    return Err((e.into(), link_main, link_assoc, close::reason::MAX_LINKS));
                 }
             }
         }
@@ -278,7 +283,7 @@ impl TransportUnicastTrait for TransportUnicastUniversal {
         let _ = self.sync(other_initial_sn).await;
 
         // Wrap the link
-        let (link, ack) = link.unpack();
+        let (link, ack, _assoc) = link.unpack();
         let (mut link, consumer) =
             TransportLinkUnicastUniversal::new(self, link, &self.priority_tx);
 
@@ -330,7 +335,7 @@ impl TransportUnicastTrait for TransportUnicastUniversal {
             }
         });
 
-        Ok((start_tx, start_rx, ack, Some(add_link_guard)))
+        Ok((start_tx, start_rx, ack, add_link_guard))
     }
 
     /*************************************/
@@ -340,8 +345,16 @@ impl TransportUnicastTrait for TransportUnicastUniversal {
         self.callback.store(Some(Arc::new(callback)));
     }
 
-    async fn get_alive(&self) -> AsyncMutexGuard<'_, bool> {
-        zasynclock!(self.alive)
+    async fn get_status(&self) -> AsyncMutexGuard<'_, TransportStatus> {
+        zasynclock!(self.add_link_lock)
+    }
+
+    fn region_name(&self) -> Option<RegionName> {
+        self.config.region_name.clone()
+    }
+
+    fn get_bound(&self) -> Option<Bound> {
+        self.config.bound.clone()
     }
 
     fn get_zid(&self) -> ZenohIdProto {
@@ -423,10 +436,6 @@ impl TransportUnicastTrait for TransportUnicastUniversal {
     /*************************************/
     async fn schedule(&self, msg: NetworkMessageMut<'_>) -> ZResult<bool> {
         self.internal_schedule(msg).await
-    }
-
-    fn try_push_sync(&self, msg: NetworkMessageRef<'_>) -> bool {
-        self.try_push_sync(msg)
     }
 
     fn add_debug_fields<'a, 'b: 'a, 'c>(

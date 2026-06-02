@@ -32,6 +32,7 @@ use zenoh_protocol::{
     core::{Region, ZenohIdProto},
     network::{declare::queryable::ext::QueryableInfoType, oam::id::OAM_LINKSTATE, Oam},
 };
+use zenoh_core::zasyncwrite;
 use zenoh_result::ZResult;
 use zenoh_sync::get_mut_unchecked;
 use zenoh_task::TerminatableTask;
@@ -82,7 +83,7 @@ impl TreesComputationWorker {
                 .await;
 
                 if let Ok(tables_ref) = rx.recv_async().await {
-                    let mut wtables = zwrite!(tables_ref.tables);
+                    let mut wtables = zasyncwrite!(tables_ref.tables);
                     let tables = &mut *wtables;
 
                     tables.hats[region]

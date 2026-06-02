@@ -17,19 +17,7 @@
 //! This crate is intended for Zenoh's internal use.
 //!
 //! [Click here for Zenoh's documentation](https://docs.rs/zenoh/latest/zenoh)
-use core::panic;
-use std::{
-    borrow::Borrow,
-    collections::HashMap,
-    env, fmt,
-    future::Future,
-    ops::Deref,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        OnceLock,
-    },
-    time::Duration,
-};
+use std::{future::Future, ops::Deref, sync::OnceLock};
 
 use tokio::{
     runtime::{Handle, Runtime},
@@ -80,16 +68,7 @@ impl ZRuntime {
         #[cfg(feature = "tracing-instrument")]
         let f = tracing::Instrument::instrument(f, tracing::Span::current());
 
-        // `tokio::task::block_in_place` requires the caller to be running inside a
-        // multi-thread tokio runtime.  When called from a plain `fn main()` (no
-        // tokio runtime active) it panics with "no reactor running".
-        // Detect this with `try_current()` and fall back to a direct `block_on` on
-        // the shared runtime, which works from any non-async thread.
-        if tokio::runtime::Handle::try_current().is_ok() {
-            tokio::task::block_in_place(move || get_shared_handle().block_on(f))
-        } else {
-            get_shared_handle().block_on(f)
-        }
+        tokio::task::block_in_place(move || get_shared_handle().block_on(f))
     }
 }
 
@@ -114,84 +93,12 @@ impl Deref for ZRuntime {
     }
 }
 
-lazy_static! {
-    pub static ref ZRUNTIME_POOL: ZRuntimePool = ZRuntimePool::new();
-    pub static ref ZRUNTIME_INDEX: HashMap<ZRuntime, AtomicUsize> = ZRuntime::iter()
-        .map(|zrt| (zrt, AtomicUsize::new(0)))
-        .collect();
-}
-
-// A runtime guard used to explicitly drop the static variables that Rust doesn't drop by default
-#[derive(Debug)]
+/// A guard that can be kept to signal intent to clean up at shutdown.
+/// With the single shared runtime, cleanup happens automatically at process exit.
 pub struct ZRuntimePoolGuard;
 
 impl Drop for ZRuntimePoolGuard {
     fn drop(&mut self) {
         // No-op: the shared runtime shuts down when the process exits.
     }
-}
-
-pub struct ZRuntimePool(HashMap<ZRuntime, OnceLock<Runtime>>);
-
-impl fmt::Debug for ZRuntimePool {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let initialized = self
-            .0
-            .iter()
-            .filter_map(|(runtime, cell)| cell.get().map(|_| runtime))
-            .collect::<Vec<_>>();
-        f.debug_struct("ZRuntimePool")
-            .field("initialized", &initialized)
-            .finish_non_exhaustive()
-    }
-}
-
-impl ZRuntimePool {
-    fn new() -> Self {
-        Self(ZRuntime::iter().map(|zrt| (zrt, OnceLock::new())).collect())
-    }
-
-    pub fn get(&self, zrt: &ZRuntime) -> &Handle {
-        // Although the ZRuntime is called to use `zrt`, it may be handed over to another one
-        // specified via the environmental variable.
-        let param: &RuntimeParam = zrt.borrow();
-        let zrt = match param.handover {
-            Some(handover) => handover,
-            None => *zrt,
-        };
-
-        self.0
-            .get(&zrt)
-            .unwrap_or_else(|| panic!("The hashmap should contains {zrt} after initialization"))
-            .get_or_init(|| {
-                zrt.init()
-                    .unwrap_or_else(|_| panic!("Failed to init {zrt}"))
-            })
-            .handle()
-    }
-}
-
-// If there are any blocking tasks spawned by ZRuntimes, the function will block until they return.
-impl Drop for ZRuntimePool {
-    fn drop(&mut self) {
-        let handles: Vec<_> = self
-            .0
-            .drain()
-            .filter_map(|(_name, mut rt)| {
-                rt.take()
-                    .map(|r| std::thread::spawn(move || r.shutdown_timeout(Duration::from_secs(1))))
-            })
-            .collect();
-
-        for hd in handles {
-            let _ = hd.join();
-        }
-    }
-}
-
-#[should_panic(expected = "Zenoh runtime doesn't support")]
-#[tokio::test]
-async fn block_in_place_fail_test() {
-    use crate::ZRuntime;
-    ZRuntime::TX.block_in_place(async { println!("Done") });
 }

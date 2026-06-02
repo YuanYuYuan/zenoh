@@ -38,6 +38,14 @@ pub(crate) struct RegionMap<D> {
     buf: Vec<Option<D>>,
 }
 
+impl<D: Clone> Clone for RegionMap<D> {
+    fn clone(&self) -> Self {
+        Self {
+            buf: self.buf.clone(),
+        }
+    }
+}
+
 impl<D> RegionMap<D> {
     pub(crate) fn get(&self, region: &Region) -> Option<&D> {
         self.buf

@@ -19,10 +19,12 @@ use std::{
     time::Duration,
 };
 
-use arc_swap::ArcSwap;
+use arc_swap::ArcSwapOption;
 use async_trait::async_trait;
+use itertools::Itertools;
 use tokio_util::sync::CancellationToken;
 use zenoh_collections::IntHashMap;
+use zenoh_keyexpr::keyexpr;
 use zenoh_protocol::{
     core::{Bound, ExprId, Region, Reliability, WhatAmI, WireExpr, ZenohIdProto},
     network::{
@@ -43,11 +45,14 @@ use crate::net::{
     routing::{
         dispatcher::{
             interests::{finalize_pending_interests, RemoteInterest},
+            pubsub::{route_data, SubscriberInfo},
             queries::{
-                finalize_pending_queries, merge_qabl_infos, route_send_response,
-                route_send_response_final, Query,
+                finalize_pending_queries, merge_qabl_infos,
+                route_query, route_send_response, route_send_response_final,
+                Query,
             },
             region::RegionMap,
+            resource::{register_expr, unregister_expr},
             tables::Tables,
         },
         hat::DispatcherContext,
@@ -115,7 +120,9 @@ pub struct FaceState {
     pub(crate) id: FaceId,
     pub(crate) zid: ZenohIdProto,
     pub(crate) whatami: WhatAmI,
-    pub(crate) primitives: Arc<dyn crate::net::primitives::Primitives + Send + Sync>,
+    pub(crate) region: Region,
+    pub(crate) remote_bound: Bound,
+    pub(crate) primitives: Arc<dyn crate::net::primitives::EPrimitives + Send + Sync>,
     pub(crate) local_interests: HashMap<InterestId, InterestState>,
     pub(crate) remote_key_interests: HashMap<InterestId, Option<Arc<Resource>>>,
     pub(crate) pending_current_interests: HashMap<InterestId, PendingCurrentInterest>,
@@ -145,15 +152,12 @@ impl FaceStateBuilder {
     pub(crate) fn new(
         id: usize,
         zid: ZenohIdProto,
-        whatami: WhatAmI,
-        primitives: Arc<dyn crate::net::primitives::Primitives + Send + Sync>,
-        mcast_group: Option<TransportMulticast>,
-        in_interceptors: Option<Arc<ArcSwap<InterceptorsChain>>>,
-        hat: Box<dyn Any + Send + Sync>,
-        is_local: bool,
-        #[cfg(feature = "stats")] stats: Option<zenoh_stats::TransportStats>,
-    ) -> Arc<FaceState> {
-        Arc::new(FaceState {
+        region: Region,
+        remote_bound: Bound,
+        primitives: Arc<dyn EPrimitives + Send + Sync>,
+        hats: RegionMap<Box<dyn Any + Send + Sync>>,
+    ) -> Self {
+        FaceStateBuilder(FaceState {
             id,
             zid,
             whatami: WhatAmI::default(),
@@ -259,36 +263,28 @@ impl FaceState {
             }
         }
 
-        if let Some(interceptor) = self
-            .primitives
-            .as_any()
-            .downcast_ref::<Mux>()
-            .map(|mux| mux.interceptor.load())
-        {
-            if let Some(interceptor) = interceptor.as_ref() {
+        if let Some(mux) = self.primitives.as_any().downcast_ref::<Mux>() {
+            if let Some(interceptor) = mux.interceptor.load_full() {
+                let chain: &InterceptorsChain = &interceptor;
                 if let Some(expr) = res.keyexpr() {
-                    let cache = interceptor.compute_keyexpr_cache(expr);
+                    let cache: Option<Box<dyn std::any::Any + Send + Sync>> = chain.compute_keyexpr_cache(expr);
                     get_mut_unchecked(
                         get_mut_unchecked(res).face_ctxs.get_mut(&self.id).unwrap(),
                     )
-                    .e_interceptor_cache = InterceptorCache::new(cache, interceptor.version);
+                    .e_interceptor_cache = InterceptorCache::new(cache, chain.version);
                 }
             }
         }
 
-        if let Some(interceptor) = self
-            .primitives
-            .as_any()
-            .downcast_ref::<McastMux>()
-            .map(|mux| mux.interceptor.load())
-        {
-            if let Some(interceptor) = interceptor.as_ref() {
+        if let Some(mux) = self.primitives.as_any().downcast_ref::<McastMux>() {
+            if let Some(interceptor) = mux.interceptor.load_full() {
+                let chain: &InterceptorsChain = &interceptor;
                 if let Some(expr) = res.keyexpr() {
-                    let cache = interceptor.compute_keyexpr_cache(expr);
+                    let cache: Option<Box<dyn std::any::Any + Send + Sync>> = chain.compute_keyexpr_cache(expr);
                     get_mut_unchecked(
                         get_mut_unchecked(res).face_ctxs.get_mut(&self.id).unwrap(),
                     )
-                    .e_interceptor_cache = InterceptorCache::new(cache, interceptor.version);
+                    .e_interceptor_cache = InterceptorCache::new(cache, chain.version);
                 }
             }
         }
@@ -418,11 +414,11 @@ impl Face {
     ///
     /// Returns early without calling `f` if the wire-expr scope is unknown.
     /// Use this for **declare** operations where the resource must exist after the call.
-    pub(crate) fn with_mapped_expr<F>(&self, expr: &WireExpr<'_>, mut f: F)
+    pub(crate) async fn with_mapped_expr<F>(&self, expr: &WireExpr<'_>, mut f: F)
     where
         F: FnMut(&mut Tables, Arc<Resource>),
     {
-        let rtables = self.tables.tables.read().unwrap();
+        let rtables = zasyncread!(self.tables.tables);
         let Some(mut prefix) = rtables
             .data
             .get_mapping(&self.state, &expr.scope, expr.mapping)
@@ -436,7 +432,7 @@ impl Face {
             Resource::get_resource(&prefix, &expr.suffix).filter(|r| r.ctx.is_some())
         {
             drop(rtables);
-            (res, self.tables.tables.write().unwrap())
+            (res, zasyncwrite!(self.tables.tables))
         } else {
             let mut fullexpr = prefix.expr().to_string();
             fullexpr.push_str(expr.suffix.as_ref());
@@ -444,7 +440,7 @@ impl Face {
                 .map(|ke| Resource::get_matches(&rtables.data, ke))
                 .unwrap_or_default();
             drop(rtables);
-            let mut wtables = self.tables.tables.write().unwrap();
+            let mut wtables = zasyncwrite!(self.tables.tables);
             let tables = &mut *wtables;
             let mut res = Resource::make_resource(tables, &mut prefix, expr.suffix.as_ref());
             matches.push(Arc::downgrade(&res));
@@ -465,14 +461,14 @@ impl Face {
     /// If `expr` is `Some`, resolves it to a resource (creating it if needed) and calls
     /// `f(tables, Some(resource))`.  If `expr` is `None`, acquires the write lock and calls
     /// `f(tables, None)` directly.
-    pub(crate) fn with_mapped_optional_expr<F>(&self, expr: Option<&WireExpr<'_>>, mut f: F)
+    pub(crate) async fn with_mapped_optional_expr<F>(&self, expr: Option<&WireExpr<'_>>, mut f: F)
     where
         F: FnMut(&mut Tables, Option<Arc<Resource>>),
     {
         match expr {
-            Some(expr) => self.with_mapped_expr(expr, |tables, res| f(tables, Some(res))),
+            Some(expr) => self.with_mapped_expr(expr, |tables, res| f(tables, Some(res))).await,
             None => {
-                let mut wtables = self.tables.tables.write().unwrap();
+                let mut wtables = zasyncwrite!(self.tables.tables);
                 let tables = &mut *wtables;
 
                 f(tables, None)
@@ -490,7 +486,7 @@ impl Face {
     ///
     /// When `make_if_unknown` is `false`, the resource must already exist; returns early if not
     /// found.  When `true`, an unknown resource is created (and matched) before calling `f`.
-    pub(crate) fn with_mapped_nullable_expr<F>(
+    pub(crate) async fn with_mapped_nullable_expr<F>(
         &self,
         expr: &WireExpr<'_>,
         make_if_unknown: bool,
@@ -499,7 +495,7 @@ impl Face {
         F: FnMut(&mut Tables, Option<Arc<Resource>>),
     {
         let (res, mut wtables) = if !expr.is_empty() {
-            let rtables = self.tables.tables.read().unwrap();
+            let rtables = zasyncread!(self.tables.tables);
 
             let Some(mut prefix) = rtables
                 .data
@@ -514,7 +510,7 @@ impl Face {
             // check `Resource::ctx` and (2) doesn't unconditionally make unknown resources.
             if let Some(res) = Resource::get_resource(&prefix, &expr.suffix) {
                 drop(rtables);
-                (Some(res), self.tables.tables.write().unwrap())
+                (Some(res), zasyncwrite!(self.tables.tables))
             } else if make_if_unknown {
                 let mut fullexpr = prefix.expr().to_string();
                 fullexpr.push_str(expr.suffix.as_ref());
@@ -522,7 +518,7 @@ impl Face {
                     .map(|ke| Resource::get_matches(&rtables.data, ke))
                     .unwrap_or_default();
                 drop(rtables);
-                let mut wtables = self.tables.tables.write().unwrap();
+                let mut wtables = zasyncwrite!(self.tables.tables);
                 let mut res =
                     Resource::make_resource(&mut wtables, &mut prefix, expr.suffix.as_ref());
                 matches.push(Arc::downgrade(&res));
@@ -533,7 +529,7 @@ impl Face {
                 return;
             }
         } else {
-            (None, self.tables.tables.write().unwrap())
+            (None, zasyncwrite!(self.tables.tables))
         };
 
         tracing::debug!(?expr, expr.mapped = ?res);
@@ -553,28 +549,14 @@ impl Primitives for Face {
         let ctrl_lock = self.tables.ctrl_lock.lock().await;
         if msg.mode != InterestMode::Final {
             let mut declares = vec![];
-            declare_interest(
-                self.tables.hat_code.as_ref(),
-                &self.tables,
-                &mut self.state.clone(),
-                msg.id,
-                msg.wire_expr.as_ref(),
-                msg.mode,
-                msg.options,
-                &mut |p, m| declares.push((p.clone(), m)),
-            ).await;
+            self.interest(&mut msg, &mut |p, m| declares.push((p.clone(), m))).await;
             drop(ctrl_lock);
             for (p, m) in declares {
-                // Extract the owned message from RoutingContext and send it async
                 let _ = p.send_declare(m.msg).await;
             }
         } else {
-            undeclare_interest(
-                self.tables.hat_code.as_ref(),
-                &self.tables,
-                &mut self.state.clone(),
-                msg.id,
-            ).await;
+            self.interest_final(&msg).await;
+            drop(ctrl_lock);
         }
         true
     }
@@ -599,7 +581,6 @@ impl Primitives for Face {
                 ).await;
                 drop(ctrl_lock);
                 for (p, m) in declares {
-                    // Extract the owned message from RoutingContext and send it async
                     let _ = p.send_declare(m.msg).await;
                 }
             }
@@ -613,7 +594,6 @@ impl Primitives for Face {
                 ).await;
                 drop(ctrl_lock);
                 for (p, m) in declares {
-                    // Extract the owned message from RoutingContext and send it async
                     let _ = p.send_declare(m.msg).await;
                 }
             }
@@ -628,7 +608,6 @@ impl Primitives for Face {
                 ).await;
                 drop(ctrl_lock);
                 for (p, m) in declares {
-                    // Extract the owned message from RoutingContext and send it async
                     let _ = p.send_declare(m.msg).await;
                 }
             }
@@ -642,7 +621,6 @@ impl Primitives for Face {
                 ).await;
                 drop(ctrl_lock);
                 for (p, m) in declares {
-                    // Extract the owned message from RoutingContext and send it async
                     let _ = p.send_declare(m.msg).await;
                 }
             }
@@ -657,7 +635,6 @@ impl Primitives for Face {
                 ).await;
                 drop(ctrl_lock);
                 for (p, m) in declares {
-                    // Extract the owned message from RoutingContext and send it async
                     let _ = p.send_declare(m.msg).await;
                 }
             }
@@ -671,34 +648,28 @@ impl Primitives for Face {
                 ).await;
                 drop(ctrl_lock);
                 for (p, m) in declares {
-                    // Extract the owned message from RoutingContext and send it async
                     let _ = p.send_declare(m.msg).await;
                 }
             }
             zenoh_protocol::network::DeclareBody::DeclareFinal(_) => {
                 let Some(id) = msg.interest_id else {
                     tracing::error!("Received DeclareFinal without interest id");
-                    return;
+                    return true;
                 };
 
-                    let mut wtables = self.tables.tables.write().await;
-                    let mut declares = vec![];
-                    declare_final(
-                        self.tables.hat_code.as_ref(),
-                        &mut wtables,
-                        &mut self.state.clone(),
-                        id,
-                        &mut |p, m| declares.push((p.clone(), m)),
-                    ).await;
+                let mut wtables = zasyncwrite!(self.tables.tables);
+                let mut declares = vec![];
+                self.declare_final(
+                    &mut wtables,
+                    id,
+                    msg.ext_nodeid.node_id,
+                    &mut |p, m| declares.push((p.clone(), m)),
+                );
 
-                    wtables.disable_all_routes();
-
-                    drop(wtables);
-                    drop(ctrl_lock);
-                    for (p, m) in declares {
-                        // Extract the owned message from RoutingContext and send it async
-                        let _ = p.send_declare(m.msg).await;
-                    }
+                drop(wtables);
+                drop(ctrl_lock);
+                for (p, m) in declares {
+                    let _ = p.send_declare(m.msg).await;
                 }
             }
         }
@@ -707,7 +678,7 @@ impl Primitives for Face {
 
     #[inline]
     async fn send_push(&self, mut msg: Push, reliability: Reliability) -> bool {
-        route_data(&self.tables, &self.state, &mut msg, reliability).await;
+        route_data(&self.tables, &self.state, &mut msg, reliability, true).await;
         true
     }
 
@@ -740,7 +711,7 @@ impl Primitives for Face {
         finalize_pending_interests(&self.tables, &mut state, &mut |p, m| {
             declares.push((p.clone(), m))
         });
-        let mut wtables = zwrite!(self.tables.tables);
+        let mut wtables = self.tables.tables.write().await;
         let tables = &mut *wtables;
 
         let mut ctx = DispatcherContext {

@@ -250,6 +250,16 @@ impl SessionState {
         })
     }
 
+    /// Returns the primitives as a plain `Arc<dyn Primitives>` without a tracing span guard.
+    /// Use this when the primitives need to be sent across threads (e.g. into `tokio::spawn`).
+    #[inline]
+    pub(crate) fn primitives_arc(&self) -> ZResult<Arc<dyn Primitives>> {
+        self.primitives
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| SessionClosedError.into())
+    }
+
     #[inline]
     fn get_local_res(&self, id: &ExprId) -> Option<&Resource> {
         Some(&self.local_resources.get(id)?.resource)
@@ -1470,7 +1480,7 @@ impl Session {
     ) -> ZResult<Option<ExprId>> {
             trace!("declare_prefix({:?})", prefix);
             let mut state = zwrite!(self.0.state);
-            let primitives = state.primitives()?;
+            let primitives: Arc<dyn crate::net::primitives::Primitives> = state.primitives()?.into_primitives();
             match state
                 .local_resources
                 .iter_mut()
@@ -1531,7 +1541,7 @@ impl Session {
     pub(crate) fn undeclare_prefix(&self, expr_id: ExprId) -> ZResult<()> {
         trace!("undedeclare_prefix({expr_id})");
         let mut state = zwrite!(self.0.state);
-        let primitives = state.primitives()?;
+        let primitives: Arc<dyn crate::net::primitives::Primitives> = state.primitives()?.into_primitives();
         if let Some(entry) = state.local_resources.get_mut(&expr_id) {
             entry.count -= 1;
             if entry.count == 0 {
@@ -1607,7 +1617,7 @@ impl Session {
         state.publishers.insert(id, pub_state);
 
         if let Some(res) = declared_pub {
-            let primitives = state.primitives()?;
+            let primitives: Arc<dyn crate::net::primitives::Primitives> = state.primitives()?.into_primitives();
             let wire_expr = Some(res.to_wire(self).to_owned());
             drop(state);
             zenoh_runtime::ZRuntime::Net.deref().spawn(async move {
@@ -1627,7 +1637,7 @@ impl Session {
 
     pub(crate) fn undeclare_publisher_inner(&self, pid: Id) -> ZResult<()> {
         let mut state = zwrite!(self.0.state);
-        let Ok(primitives) = state.primitives() else {
+        let Ok(primitives) = state.primitives().map(|p| p.into_primitives()) else {
             return Ok(());
         };
         if let Some(pub_state) = state.publishers.remove(&pid) {
@@ -1668,7 +1678,7 @@ impl Session {
     ) -> ZResult<EntityId> {
         tracing::trace!("declare_querier({:?})", key_expr);
         let mut state = zwrite!(self.0.state);
-        let primitives = state.primitives()?;
+        let primitives: Arc<dyn crate::net::primitives::Primitives> = state.primitives()?.into_primitives();
         let id = self.0.runtime.next_id();
         let declared_querier = state.register_querier(id, &key_expr, destination);
         if let Some(res) = declared_querier {
@@ -1691,7 +1701,7 @@ impl Session {
 
     pub(crate) fn undeclare_querier_inner(&self, querier_id: Id) -> ZResult<()> {
         let mut state = zwrite!(self.0.state);
-        let Ok(primitives) = state.primitives() else {
+        let Ok(primitives) = state.primitives().map(|p| p.into_primitives()) else {
             return Ok(());
         };
         if let Some(querier_state) = state.queriers.remove(&querier_id) {
@@ -1752,7 +1762,7 @@ impl Session {
     ) -> ZResult<Arc<SubscriberState>> {
         tracing::trace!("declare_subscriber({:?})", key_expr);
         let mut state = zwrite!(self.0.state);
-        let primitives = state.primitives()?;
+        let primitives: Arc<dyn crate::net::primitives::Primitives> = state.primitives()?.into_primitives();
         self.register_callback_drop_notifier(callback_drop_notifier, &mut callback);
         let id = self.0.runtime.next_id();
         let (sub_state, declared_sub) = state.register_subscriber(id, key_expr, origin, callback);
@@ -1780,7 +1790,7 @@ impl Session {
 
     pub(crate) fn undeclare_subscriber_inner(&self, sid: Id, kind: SubscriberKind) -> ZResult<()> {
         let mut state = zwrite!(self.0.state);
-        let Ok(primitives) = state.primitives() else {
+        let Ok(primitives) = state.primitives().map(|p| p.into_primitives()) else {
             return Ok(());
         };
         if let Some(sub_state) = state.subscribers_mut(kind).remove(&sid) {
@@ -1850,7 +1860,7 @@ impl Session {
                     }
                 }
                 SubscriberKind::LivelinessSubscriber => {
-                    let primitives = state.primitives()?;
+                    let primitives: Arc<dyn crate::net::primitives::Primitives> = state.primitives()?.into_primitives();
                     drop(state);
 
                     let id = sub_state.id;
@@ -1890,7 +1900,7 @@ impl Session {
     ) -> ZResult<Arc<QueryableState>> {
         tracing::trace!("declare_queryable({:?})", key_expr);
         let mut state = zwrite!(self.0.state);
-        let primitives = state.primitives()?;
+        let primitives: Arc<dyn crate::net::primitives::Primitives> = state.primitives()?.into_primitives();
         self.register_callback_drop_notifier(callback_drop_notifier, &mut callback);
         let id = self.0.runtime.next_id();
         let qable_state = Arc::new(QueryableState {
@@ -1939,7 +1949,7 @@ impl Session {
 
     pub(crate) fn close_queryable(&self, qid: Id) -> ZResult<()> {
         let mut state = zwrite!(self.0.state);
-        let Ok(primitives) = state.primitives() else {
+        let Ok(primitives) = state.primitives().map(|p| p.into_primitives()) else {
             return Ok(());
         };
         if let Some(qable_state) = state.queryables.remove(&qid) {
@@ -1985,7 +1995,7 @@ impl Session {
     pub(crate) fn declare_liveliness_inner(&self, key_expr: &KeyExpr) -> ZResult<Id> {
         tracing::trace!("declare_liveliness({:?})", key_expr);
         let id = self.0.runtime.next_id();
-        let primitives = zread!(self.0.state).primitives()?;
+        let primitives: Arc<dyn crate::net::primitives::Primitives> = zread!(self.0.state).primitives()?.into_primitives();
         let wire_expr = key_expr.to_wire(self).to_owned();
         zenoh_runtime::ZRuntime::Net.deref().spawn(async move {
             primitives.send_declare(Declare {
@@ -2013,7 +2023,7 @@ impl Session {
     ) -> ZResult<Arc<SubscriberState>> {
         trace!("declare_liveliness_subscriber({:?})", key_expr);
         let mut state = zwrite!(self.0.state);
-        let primitives = state.primitives()?;
+        let primitives: Arc<dyn crate::net::primitives::Primitives> = state.primitives()?.into_primitives();
         self.register_callback_drop_notifier(callback_drop_notifier, &mut callback);
         let id = self.0.runtime.next_id();
         let sub_state = SubscriberState {
@@ -2112,7 +2122,7 @@ impl Session {
     }
 
     pub(crate) fn undeclare_liveliness(&self, tid: Id) -> ZResult<()> {
-        let Ok(primitives) = zread!(self.0.state).primitives() else {
+        let Ok(primitives) = zread!(self.0.state).primitives().map(|p| p.into_primitives()) else {
             return Ok(());
         };
         trace!("undeclare_liveliness({:?})", tid);
@@ -2512,7 +2522,7 @@ impl Session {
     ) -> ZResult<()> {
         trace!("write({:?}, [...])", key_expr);
         let state = zread!(self.0.state);
-        let primitives = state.primitives()?;
+        let primitives: Arc<dyn crate::net::primitives::Primitives> = state.primitives()?.into_primitives();
         let wire_expr = key_expr.to_wire(self);
         let mut callbacks = SubscriberCallbacks::default();
         if destination != Locality::Remote {
@@ -2676,7 +2686,7 @@ impl Session {
             mode => mode,
         };
         let qid = state.qid_counter.fetch_add(1, Ordering::SeqCst);
-        let primitives = state.primitives()?;
+        let primitives: Arc<dyn crate::net::primitives::Primitives> = state.primitives()?.into_primitives();
         self.register_query_cancellation(
             #[cfg(feature = "unstable")]
             cancellation_token,
@@ -2826,7 +2836,7 @@ impl Session {
         // This is because both query's id and subscriber's id are used as interest id,
         // so both must not overlap.
         let id = self.0.runtime.next_id();
-        let primitives = state.primitives()?;
+        let primitives: Arc<dyn crate::net::primitives::Primitives> = state.primitives()?.into_primitives();
         self.register_query_cancellation(
             #[cfg(feature = "unstable")]
             cancellation_token,
@@ -2919,7 +2929,7 @@ impl Session {
         body: Option<QueryBodyType>,
         attachment: Option<ZBytes>,
     ) {
-        let Ok(primitives) = state.primitives() else {
+        let Ok(primitives) = state.primitives().map(|p| p.into_primitives()) else {
             return;
         };
         let queryables = state
@@ -2949,7 +2959,7 @@ impl Session {
             primitives: if local {
                 ReplyPrimitives::new_local(self.downgrade())
             } else {
-                ReplyPrimitives::new_remote(Some(self.downgrade()), primitives.into_primitives())
+                ReplyPrimitives::new_remote(Some(self.downgrade()), primitives)
             },
         });
         if !queryables.is_empty() {
@@ -3254,7 +3264,7 @@ impl Primitives for WeakSession {
 
                 let Some(interest_id) = msg.interest_id else {
                     tracing::error!("Received DeclareFinal without interest id");
-                    return;
+                    return true;
                 };
 
                 let mut state = zwrite!(self.0.state);
@@ -3271,7 +3281,7 @@ impl Primitives for WeakSession {
             state.subscriber_callbacks(false, SubscriberKind::Subscriber, &msg.wire_expr, false);
         drop(state);
         callbacks.call(
-            consume,
+            true,
             msg.ext_qos,
             &mut msg.payload,
             #[cfg(feature = "unstable")]

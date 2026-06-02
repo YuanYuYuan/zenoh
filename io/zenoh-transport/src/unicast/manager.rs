@@ -13,6 +13,7 @@
 //
 use std::{
     collections::HashMap,
+    fmt,
     sync::{
         atomic::{AtomicUsize, Ordering::SeqCst},
         Arc,
@@ -50,6 +51,7 @@ use crate::{
 /*************************************/
 /*         TRANSPORT CONFIG          */
 /*************************************/
+#[derive(Debug)]
 pub struct TransportManagerConfigUnicast {
     pub lease: Duration,
     pub keep_alive: usize,
@@ -110,11 +112,20 @@ pub struct TransportManagerStateUnicast {
     pub(super) authenticator: Arc<Auth>,
 }
 
+impl fmt::Debug for TransportManagerStateUnicast {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TransportManagerStateUnicast")
+            .field("incoming", &self.incoming)
+            .finish_non_exhaustive()
+    }
+}
+
 pub struct TransportManagerParamsUnicast {
     pub config: TransportManagerConfigUnicast,
     pub state: TransportManagerStateUnicast,
 }
 
+#[derive(Debug)]
 pub struct TransportManagerBuilderUnicast {
     // NOTE: In order to consider eventual packet loss and transmission latency and jitter,
     //       set the actual keep_alive timeout to one fourth of the lease time.
@@ -440,9 +451,11 @@ impl TransportManager {
                 existing_config
             );
             tracing::trace!("{}", e);
+            let (link_main, link_assoc) = link.fail();
             return Err(InitTransportError::Link((
                 e.into(),
-                link.fail(),
+                link_main,
+                link_assoc,
                 close::reason::INVALID,
             )));
         }
@@ -490,6 +503,7 @@ impl TransportManager {
             is_qos: transport.get_config().is_qos,
             #[cfg(feature = "shared-memory")]
             is_shm: transport.is_shm(),
+            region_name: transport.region_name(),
         };
         // Notify the transport handler that there is a new transport and get back a callback
         // NOTE: the read loop of the link the open message was sent on remains blocked
@@ -519,7 +533,8 @@ impl TransportManager {
                 match $s {
                     Ok(output) => output,
                     Err(e) => {
-                        return Err(InitTransportError::Link((e, link.fail(), $reason)));
+                        let (link_main, link_assoc) = link.fail();
+                        return Err(InitTransportError::Link((e, link_main, link_assoc, $reason)));
                     }
                 }
             };
@@ -529,9 +544,11 @@ impl TransportManager {
         if config.zid == self.zid() {
             let e = zerror!("{} Attempt to establish transport to itself", self.zid());
             tracing::warn!("{e}");
+            let (link_main, link_assoc) = link.fail();
             return Err(InitTransportError::Link((
                 e.into(),
-                link.fail(),
+                link_main,
+                link_assoc,
                 close::reason::CONNECTION_TO_SELF,
             )));
         }
@@ -544,9 +561,11 @@ impl TransportManager {
                 config.zid
             );
             tracing::trace!("{e}");
+            let (link_main, link_assoc) = link.fail();
             return Err(InitTransportError::Link((
                 e.into(),
-                link.fail(),
+                link_main,
+                link_assoc,
                 close::reason::INVALID,
             )));
         }
@@ -605,7 +624,7 @@ impl TransportManager {
             match t.add_link(link, other_initial_sn, other_lease).await {
                 Ok(val) => val,
                 Err(e) => {
-                    let _ = t.close(e.2).await;
+                    let _ = t.close(e.3).await;
                     return Err(InitTransportError::Link(e));
                 }
             };
@@ -714,7 +733,7 @@ impl TransportManager {
 
         match init_result {
             Ok(transport) => Ok(TransportUnicast(Arc::downgrade(&transport))),
-            Err(InitTransportError::Link((e, link, reason))) => {
+            Err(InitTransportError::Link((e, link, _assoc_link, reason))) => {
                 let _ = link.close(Some(reason)).await;
                 Err(e)
             }

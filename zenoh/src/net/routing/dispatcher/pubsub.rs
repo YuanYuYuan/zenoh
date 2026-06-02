@@ -14,9 +14,11 @@
 
 use std::sync::Arc;
 
+use itertools::Itertools;
 use zenoh_protocol::{
     core::{Region, Reliability, WireExpr},
     network::{declare::SubscriberId, push::ext, Push},
+    zenoh::PushBody,
 };
 
 use super::{
@@ -37,54 +39,24 @@ use crate::net::routing::{
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub(crate) struct SubscriberInfo;
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn declare_subscription<'a>(
-    hat_code: &(dyn HatTrait + Send + Sync),
-    tables: &TablesLock,
-    face: &mut Arc<FaceState>,
-    id: SubscriberId,
-    expr: &'a WireExpr<'a>,
-    sub_info: &SubscriberInfo,
-    node_id: NodeId,
-    send_declare: &'a mut SendDeclare<'a>,
-) {
-    let rtables = tables.tables.read().await;
-    match rtables
-        .get_mapping(face, &expr.scope, expr.mapping)
-        .cloned()
-    {
-        Some(mut prefix) => {
-            tracing::debug!(
-                "{} Declare subscriber {} ({}{})",
-                face,
-                id,
-                prefix.expr(),
-                expr.suffix
-            );
-            let res = Resource::get_resource(&prefix, &expr.suffix);
-            let (mut res, mut wtables) =
-                if res.as_ref().map(|r| r.context.is_some()).unwrap_or(false) {
-                    drop(rtables);
-                    let wtables = tables.tables.write().await;
-                    (res.unwrap(), wtables)
-                } else {
-                    let mut fullexpr = prefix.expr().to_string();
-                    fullexpr.push_str(expr.suffix.as_ref());
-                    let mut matches = keyexpr::new(fullexpr.as_str())
-                        .map(|ke| Resource::get_matches(&rtables, ke))
-                        .unwrap_or_default();
-                    drop(rtables);
-                    let mut wtables = tables.tables.write().await;
-                    let mut res = Resource::make_resource(
-                        hat_code,
-                        &mut wtables,
-                        &mut prefix,
-                        expr.suffix.as_ref(),
-                    );
-                    matches.push(Arc::downgrade(&res));
-                    Resource::match_resource(&wtables, &mut res, matches);
-                    (res, wtables)
-                };
+impl Face {
+    #[tracing::instrument(
+        level = "debug",
+        skip(self, send_declare, sub_info),
+        fields(expr = %expr, node_id = node_id_as_source(node_id)),
+        ret
+    )]
+    pub(crate) async fn declare_subscriber(
+        &self,
+        id: SubscriberId,
+        expr: &WireExpr<'_>,
+        sub_info: &SubscriberInfo,
+        node_id: NodeId,
+        send_declare: &mut SendDeclare<'_>,
+    ) {
+        self.with_mapped_expr(expr, |tables, mut res| {
+            let hats = &mut tables.hats;
+            let region = self.state.region;
 
             let mut ctx = DispatcherContext {
                 tables_lock: &self.tables,
@@ -106,62 +78,53 @@ pub(crate) async fn declare_subscription<'a>(
 
                 hats[dst].propagate_subscriber(ctx.reborrow(), res.clone(), other_info);
             }
-        });
+        }).await;
     }
 
-pub(crate) async fn undeclare_subscription<'a>(
-    hat_code: &(dyn HatTrait + Send + Sync),
-    tables: &TablesLock,
-    face: &mut Arc<FaceState>,
-    id: SubscriberId,
-    expr: &'a WireExpr<'a>,
-    node_id: NodeId,
-    send_declare: &'a mut SendDeclare<'a>,
-) {
-    let res = if expr.is_empty() {
-        None
-    } else {
-        let rtables = tables.tables.read().await;
-        match rtables.get_mapping(face, &expr.scope, expr.mapping) {
-            Some(prefix) => match Resource::get_resource(prefix, expr.suffix.as_ref()) {
-                Some(res) => Some(res),
-                None => {
-                    tracing::error!(
-                        "{} Undeclare unknown subscriber {}{}!",
-                        face,
-                        prefix.expr(),
-                        expr.suffix
-                    );
-                    return;
+    #[tracing::instrument(
+        level = "debug",
+        skip(self, send_declare),
+        fields(expr = %expr, node_id = node_id_as_source(node_id)),
+        ret
+    )]
+    pub(crate) async fn undeclare_subscriber(
+        &self,
+        id: SubscriberId,
+        expr: &WireExpr<'_>,
+        node_id: NodeId,
+        send_declare: &mut SendDeclare<'_>,
+    ) {
+        self.with_mapped_nullable_expr(expr, /* make_if_unknown */ false, |tables, res| {
+            let region = self.state.region;
+
+            let mut ctx = DispatcherContext {
+                tables_lock: &self.tables,
+                tables: &mut tables.data,
+                src_face: &mut self.state.clone(),
+                send_declare,
+            };
+
+            if let Some(mut res) =
+                tables.hats[region].unregister_subscriber(ctx.reborrow(), id, res.clone(), node_id)
+            {
+                tables.hats[region].disable_data_routes(&mut res);
+
+                let mut remaining = tables
+                    .hats
+                    .values_mut()
+                    .filter(|hat| hat.remote_subscribers_of(ctx.tables, &res).is_some())
+                    .collect_vec();
+
+                if (*remaining).is_empty() {
+                    for hat in tables.hats.values_mut() {
+                        hat.unpropagate_subscriber(ctx.reborrow(), res.clone());
+                    }
+                    Resource::clean(&mut res);
+                } else if let [last_owner] = &mut *remaining {
+                    last_owner.unpropagate_last_non_owned_subscriber(ctx, res.clone())
                 }
             }
-        }
-    };
-    let mut wtables = tables.tables.write().await;
-    if let Some(mut res) =
-        hat_code.undeclare_subscription(&mut wtables, face, id, res, node_id, send_declare)
-    {
-        tracing::debug!("{} Undeclare subscriber {} ({})", face, id, res.expr());
-        disable_matches_data_routes(&mut wtables, &mut res);
-        Resource::clean(&mut res);
-        drop(wtables);
-    } else {
-        // NOTE: This is expected behavior if subscriber declarations are denied with ingress ACL interceptor.
-        tracing::debug!("{} Undeclare unknown subscriber {}", face, id);
-    }
-}
-
-pub(crate) fn disable_matches_data_routes(_tables: &mut Tables, res: &mut Arc<Resource>) {
-    if res.context.is_some() {
-        get_mut_unchecked(res).context_mut().disable_data_routes();
-        for match_ in &res.context().matches {
-            let mut match_ = match_.upgrade().unwrap();
-            if !Arc::ptr_eq(&match_, res) {
-                get_mut_unchecked(&mut match_)
-                    .context_mut()
-                    .disable_data_routes();
-            }
-        }
+        }).await;
     }
 }
 
@@ -281,37 +244,31 @@ pub(crate) fn try_route_push_sync(
         return false;
     };
 
-    let Some(prefix) = tables.get_mapping(face, &msg.wire_expr.scope, msg.wire_expr.mapping)
+    let Some(prefix) = tables.data.get_mapping(face, &msg.wire_expr.scope, msg.wire_expr.mapping)
     else {
         return false;
     };
 
     let expr = RoutingExpr::new(prefix, msg.wire_expr.suffix.as_ref());
 
-    if !tables_ref.hat_code.ingress_filter(&tables, face, &expr) {
+    if !tables.ingress_filter(face) {
         return true; // filtered out, nothing to do — success
     }
 
-    let route = get_data_route(
-        tables_ref.hat_code.as_ref(),
-        &tables,
-        face,
-        &expr,
-        msg.ext_nodeid.node_id,
-    );
+    let route = get_data_route(&tables, face, &expr, msg.ext_nodeid.node_id);
     if route.is_empty() {
         return true; // no subscribers, nothing to do — success
     }
 
     // Inline treat_timestamp logic — cannot use the macro because it uses `return;`
     // which doesn't match our `-> bool` return type.
-    if let Some(hlc) = &tables.hlc {
+    if let Some(hlc) = &tables.data.hlc {
         if let PushBody::Put(data) = &mut msg.payload {
             if let Some(ref ts) = data.timestamp {
                 match hlc.update_with_timestamp(ts) {
                     Ok(()) => (),
                     Err(e) => {
-                        if tables.drop_future_timestamp {
+                        if tables.data.drop_future_timestamp {
                             tracing::error!(
                                 "Error treating timestamp for received Data ({}). Drop it!",
                                 e
@@ -334,25 +291,31 @@ pub(crate) fn try_route_push_sync(
         }
     }
 
+    let src_zid_for_filter = tables.hats[face.region]
+        .remote_node_id_to_zid(face, msg.ext_nodeid.node_id);
+    let inter_region_filter = |dir: &Direction| {
+        InterRegionFilter {
+            src: &face.region,
+            dst: &dir.dst_face.region,
+            src_zid: src_zid_for_filter.as_ref(),
+            fwd_zid: Some(&face.zid),
+            dst_zid: Some(&dir.dst_face.zid),
+        }
+        .resolve(&tables)
+    };
+
     if route.len() == 1 {
-        let (outface, key_expr, context) = route.iter().next().unwrap();
-        if tables_ref
-            .hat_code
-            .egress_filter(&tables, face, outface, &expr)
-        {
-            drop(tables); // release read lock before pushing
+        let dir = route.iter().next().unwrap();
+        if inter_region_filter(dir) && tables.egress_filter(face, &dir.dst_face) {
+            drop(tables);
             let msg_to_send = Push {
-                wire_expr: key_expr.into(),
+                wire_expr: dir.wire_expr.clone(),
                 ext_qos: msg.ext_qos,
                 ext_tstamp: msg.ext_tstamp,
-                ext_nodeid: ext::NodeIdType { node_id: *context },
+                ext_nodeid: ext::NodeIdType { node_id: dir.node_id },
                 payload: msg.payload.clone(),
             };
-            if outface
-                .primitives
-                .try_push_sync(&msg_to_send, reliability)
-            {
-                // Reset wire_expr to indicate the message has been consumed
+            if dir.dst_face.primitives.try_push_sync(&msg_to_send, reliability) {
                 msg.wire_expr = WireExpr::empty();
                 return true;
             }
@@ -365,25 +328,21 @@ pub(crate) fn try_route_push_sync(
     // Multi-subscriber: collect eligible outfaces before dropping table lock
     let eligible: Vec<_> = route
         .iter()
-        .filter(|(outface, _key_expr, _context)| {
-            tables_ref
-                .hat_code
-                .egress_filter(&tables, face, outface, &expr)
-        })
+        .filter(|dir| inter_region_filter(dir) && tables.egress_filter(face, &dir.dst_face))
         .cloned()
         .collect();
 
     drop(tables);
 
-    for (outface, key_expr, context) in &eligible {
+    for dir in &eligible {
         let msg_to_send = Push {
-            wire_expr: key_expr.clone(),
+            wire_expr: dir.wire_expr.clone(),
             ext_qos: msg.ext_qos,
             ext_tstamp: None,
-            ext_nodeid: ext::NodeIdType { node_id: *context },
+            ext_nodeid: ext::NodeIdType { node_id: dir.node_id },
             payload: msg.payload.clone(),
         };
-        if !outface.primitives.try_push_sync(&msg_to_send, reliability) {
+        if !dir.dst_face.primitives.try_push_sync(&msg_to_send, reliability) {
             return false; // one outface failed — async fallback handles all
         }
     }
@@ -399,19 +358,23 @@ pub async fn route_data(
 ) {
     // Fast path: try_read() succeeds without blocking when no writer holds the lock (99.9% of
     // messages). Falls back to async wait only under declaration churn.
-    let tables = match tables_ref.tables.try_read() {
+    let rtables = match tables_ref.tables.try_read() {
         Some(g) => g,
         None => tables_ref.tables.read().await,
     };
-    match tables.get_mapping(face, &msg.wire_expr.scope, msg.wire_expr.mapping) {
-        Some(prefix) => {
-            tracing::trace!(
-                "{} Route data for res {}{}",
-                face,
-                prefix.expr(),
-                msg.wire_expr.suffix.as_ref()
-            );
-            let expr = RoutingExpr::new(prefix, msg.wire_expr.suffix.as_ref());
+    let tables = &*rtables;
+    let Some(prefix) =
+        rtables
+            .data
+            .get_mapping(src_face, &msg.wire_expr.scope, msg.wire_expr.mapping)
+    else {
+        tracing::error!(
+            "{} Route data with unknown scope {}!",
+            src_face,
+            msg.wire_expr.scope
+        );
+        return;
+    };
 
     tracing::trace!(
         "{} Route data for res {}{}",
@@ -430,80 +393,6 @@ pub async fn route_data(
     if !tables.ingress_filter(src_face) {
         return;
     }
-
-    let send_push = |dst_face: &FaceState, msg: &mut Push, reliability: Reliability| {
-        if dst_face.primitives.send_push(msg, reliability) {
-            #[cfg(feature = "stats")]
-            let payload_observer = super::stats::PayloadObserver::new(msg, Some(&expr), &tables);
-            #[cfg(feature = "stats")]
-            payload_observer.observe_payload(zenoh_stats::Rx, face, msg);
-
-            if tables_ref.hat_code.ingress_filter(&tables, face, &expr) {
-                let route = get_data_route(
-                    tables_ref.hat_code.as_ref(),
-                    &tables,
-                    face,
-                    &expr,
-                    msg.ext_nodeid.node_id,
-                );
-
-                if !route.is_empty() {
-                    treat_timestamp!(&tables.hlc, msg.payload, tables.drop_future_timestamp);
-
-                    if route.len() == 1 {
-                        let (outface, key_expr, context) = route.iter().next().unwrap();
-                        if tables_ref
-                            .hat_code
-                            .egress_filter(&tables, face, outface, &expr)
-                        {
-                            drop(tables);
-                            // Construct msg_to_send directly — avoids cloning the wire_expr
-                            // string a second time (the original code set msg.wire_expr then
-                            // cloned msg, paying for two string allocations).
-                            let msg_to_send = Push {
-                                wire_expr: key_expr.into(),
-                                ext_qos: msg.ext_qos,
-                                ext_tstamp: msg.ext_tstamp,
-                                ext_nodeid: ext::NodeIdType { node_id: *context },
-                                payload: msg.payload.clone(),
-                            };
-                            if outface.primitives.send_push(msg_to_send, reliability).await {
-                                #[cfg(feature = "stats")]
-                                payload_observer.observe_payload(zenoh_stats::Tx, outface, msg);
-                            }
-                            // Reset the wire_expr to indicate the message has been consumed
-                            msg.wire_expr = WireExpr::empty();
-                        }
-                    } else {
-                        let route = route
-                            .iter()
-                            .filter(|(outface, _key_expr, _context)| {
-                                tables_ref
-                                    .hat_code
-                                    .egress_filter(&tables, face, outface, &expr)
-                            })
-                            .cloned()
-                            .collect::<Vec<Direction>>();
-
-                        drop(tables);
-                        for (outface, key_expr, context) in route {
-                            let msg_to_send = Push {
-                                wire_expr: key_expr,
-                                ext_qos: msg.ext_qos,
-                                ext_tstamp: None,
-                                ext_nodeid: ext::NodeIdType { node_id: context },
-                                payload: msg.payload.clone(),
-                            };
-                            if outface.primitives.send_push(msg_to_send, reliability).await {
-                                #[cfg(feature = "stats")]
-                                payload_observer.observe_payload(zenoh_stats::Tx, &outface, &msg);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    };
 
     let route = get_data_route(&rtables, src_face, &expr, msg.ext_nodeid.node_id);
 
@@ -547,7 +436,10 @@ pub async fn route_data(
                 msg.ext_nodeid = ext::NodeIdType {
                     node_id: dir.node_id,
                 };
-                send_push(&dir.dst_face, msg, reliability);
+                if dir.dst_face.primitives.send_push(msg.clone(), reliability).await {
+                    #[cfg(feature = "stats")]
+                    payload_observer.observe_payload(zenoh_stats::Tx, &dir.dst_face, msg);
+                }
             }
         } else {
             let dirs = route
@@ -559,19 +451,19 @@ pub async fn route_data(
 
             drop(rtables);
             for dir in dirs {
-                send_push(
-                    &dir.dst_face,
-                    &mut Push {
-                        wire_expr: dir.wire_expr.clone(),
-                        ext_qos: msg.ext_qos,
-                        ext_tstamp: None,
-                        ext_nodeid: ext::NodeIdType {
-                            node_id: dir.node_id,
-                        },
-                        payload: msg.payload.clone(),
+                let send_msg = Push {
+                    wire_expr: dir.wire_expr.clone(),
+                    ext_qos: msg.ext_qos,
+                    ext_tstamp: None,
+                    ext_nodeid: ext::NodeIdType {
+                        node_id: dir.node_id,
                     },
-                    reliability,
-                );
+                    payload: msg.payload.clone(),
+                };
+                if dir.dst_face.primitives.send_push(send_msg, reliability).await {
+                    #[cfg(feature = "stats")]
+                    payload_observer.observe_payload(zenoh_stats::Tx, &dir.dst_face, msg);
+                }
             }
         }
     }

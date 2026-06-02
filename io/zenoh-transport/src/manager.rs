@@ -36,6 +36,7 @@ use super::{
     },
     TransportEventHandler,
 };
+#[cfg(feature = "uring")]
 use crate::uring::Uring;
 #[cfg(feature = "shared-memory")]
 use crate::shm_context::ShmContext;
@@ -174,6 +175,7 @@ pub struct TransportManagerState {
     pub multicast: TransportManagerStateMulticast,
     #[cfg(feature = "shared-memory")]
     pub shm_context: Option<ShmContext>,
+    #[cfg(feature = "uring")]
     pub uring: Uring,
 }
 
@@ -501,6 +503,7 @@ impl TransportManagerBuilder {
             multicast: multicast.state,
             #[cfg(feature = "shared-memory")]
             shm_context,
+            #[cfg(feature = "uring")]
             uring: Uring::default()
         };
 

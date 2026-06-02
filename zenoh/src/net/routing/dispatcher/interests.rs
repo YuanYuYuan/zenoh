@@ -77,27 +77,10 @@ impl RemoteInterest {
     }
 }
 
-pub(crate) async fn declare_final<'a>(
-    hat_code: &(dyn HatTrait + Send + Sync),
-    wtables: &mut Tables,
-    face: &mut Arc<FaceState>,
-    id: InterestId,
-    send_declare: &'a mut SendDeclare<'a>,
-) {
-    if let Some(interest) = get_mut_unchecked(face)
-        .pending_current_interests
-        .remove(&id)
-    {
-        finalize_pending_interest(interest, send_declare);
-    }
-
-    hat_code.declare_final(wtables, face, id);
-}
-
-pub(crate) async fn finalize_pending_interests<'a>(
+pub(crate) fn finalize_pending_interests(
     _tables_ref: &TablesLock,
     face: &mut Arc<FaceState>,
-    send_declare: &'a mut SendDeclare<'a>,
+    send_declare: &mut SendDeclare,
 ) {
     for (_, interest) in get_mut_unchecked(face).pending_current_interests.drain() {
         finalize_pending_interest(interest, send_declare);
@@ -163,7 +146,7 @@ impl CurrentInterestCleanup {
             face.task_controller
                 .spawn_with_rt(zenoh_runtime::ZRuntime::Net, async move {
                     tokio::select! {
-                        _ = async_io::Timer::after(cleanup.interests_timeout) => { cleanup.run().await }
+                        _ = tokio::time::sleep(cleanup.interests_timeout) => { cleanup.run().await }
                         _ = cancellation_token.cancelled() => {}
                         _ = rejection_token.cancelled() => { cleanup.execute(false).await }
                     }
@@ -189,13 +172,12 @@ impl CurrentInterestCleanup {
                         self.interests_timeout,
                     );
                 }
-                let mut declares = vec![];
                 finalize_pending_interest(interest, &mut |p, m| {
-                    declares.push((p.clone(), m))
+                    let p = p.clone();
+                    tokio::spawn(async move {
+                        let _ = p.send_declare(m.msg).await;
+                    });
                 });
-                for (p, m) in declares {
-                    let _ = p.send_declare(m.msg).await;
-                }
             }
         }
     }
@@ -208,84 +190,54 @@ impl Timed for CurrentInterestCleanup {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn declare_interest<'a>(
-    hat_code: &(dyn HatTrait + Send + Sync),
-    tables_ref: &Arc<TablesLock>,
-    face: &mut Arc<FaceState>,
-    id: InterestId,
-    expr: Option<&'a WireExpr<'a>>,
-    mode: InterestMode,
-    options: InterestOptions,
-    send_declare: &'a mut SendDeclare<'a>,
-) {
-    if options.keyexprs() && mode != InterestMode::Current {
-        register_expr_interest(tables_ref, face, id, expr).await;
-    }
+impl Face {
+    #[tracing::instrument(
+        level = "debug", 
+        skip(self, msg, send_declare),
+        fields(
+            id = msg.id,
+            mode = ?msg.mode,
+            opts = %msg.options,
+            expr = msg.wire_expr.as_ref().map(|we| we.to_string())
+        ),
+        ret
+    )]
+    pub(crate) async fn interest(&self, msg: &mut Interest, send_declare: &mut SendDeclare<'_>) {
+        let region = self.state.region;
 
-    if let Some(expr) = expr {
-        let rtables = tables_ref.tables.read().await;
-        match rtables
-            .get_mapping(face, &expr.scope, expr.mapping)
-            .cloned()
-        {
-            Some(mut prefix) => {
-                tracing::debug!(
-                    "{} Declare interest {} ({}{})",
-                    face,
-                    id,
-                    prefix.expr(),
-                    expr.suffix
-                );
-                let res = Resource::get_resource(&prefix, &expr.suffix);
-                let (mut res, mut wtables) =
-                    if res.as_ref().map(|r| r.context.is_some()).unwrap_or(false) {
-                        drop(rtables);
-                        let wtables = tables_ref.tables.write().await;
-                        (res.unwrap(), wtables)
-                    } else {
-                        let mut fullexpr = prefix.expr().to_string();
-                        fullexpr.push_str(expr.suffix.as_ref());
-                        let mut matches = keyexpr::new(fullexpr.as_str())
-                            .map(|ke| Resource::get_matches(&rtables, ke))
-                            .unwrap_or_default();
-                        drop(rtables);
-                        let mut wtables = tables_ref.tables.write().await;
-                        let mut res = Resource::make_resource(
-                            hat_code,
-                            &mut wtables,
-                            &mut prefix,
-                            expr.suffix.as_ref(),
-                        );
-                        matches.push(Arc::downgrade(&res));
-                        Resource::match_resource(&wtables, &mut res, matches);
-                        (res, wtables)
-                    };
-
-                hat_code.declare_interest(
-                    &mut wtables,
-                    tables_ref,
-                    face,
-                    id,
-                    Some(&mut res),
-                    mode,
-                    options,
-                    send_declare,
-                );
-            }
-            None => tracing::error!(
-                "{} Declare interest {} for unknown scope {}!",
-                face,
-                id,
-                expr.scope
-            ),
+        if region.bound().is_north() && !self.state.whatami.is_peer() {
+            tracing::error!(
+                src = %self.state,
+                "Ignoring interest from non-peer north-bound face (illegal)"
+            );
+            return;
         }
-    } else {
-        let mut wtables = tables_ref.tables.write().await;
-        hat_code.declare_interest(
-            &mut wtables,
-            tables_ref,
-            face,
+
+        if self.state.whatami.is_router() {
+            tracing::warn!("Ignoring interest from router (unsupported)");
+            return;
+        }
+
+        if msg.options.aggregate() && self.state.whatami.is_peer() {
+            tracing::warn!("Ignoring aggregate interest option from peer (unsupported)");
+            msg.options -= InterestOptions::AGGREGATE;
+        }
+
+        if msg.options.aggregate() && msg.options.tokens() {
+            tracing::error!("Ignoring aggregate interest option for tokens (illegal)");
+            msg.options -= InterestOptions::AGGREGATE;
+        }
+
+        if msg.mode == InterestMode::Current
+            && (msg.options.subscribers() || msg.options.queryables() || !msg.options.tokens())
+        {
+            tracing::error!("Current interests may only refer to tokens (illegal)");
+            return;
+        }
+
+        let msg = &*msg;
+
+        let Interest {
             id,
             mode,
             options,
@@ -299,7 +251,7 @@ pub(crate) async fn declare_interest<'a>(
                 &mut self.state.clone(),
                 *id,
                 wire_expr.as_ref(),
-            );
+            ).await;
         }
 
         self.with_mapped_optional_expr(wire_expr.as_ref(), |tables, res| {
@@ -380,7 +332,7 @@ pub(crate) async fn declare_interest<'a>(
             if let RouteInterestResult::ResolvedCurrentInterest = route_interest_res {
                 hats[region].send_declare_final(ctx.reborrow(), msg.id, &src);
             }
-        });
+        }).await;
     }
 
     #[tracing::instrument(
@@ -395,8 +347,8 @@ pub(crate) async fn declare_interest<'a>(
         ),
         ret
     )]
-    pub(crate) fn interest_final(&self, msg: &Interest) {
-        let mut wtables = zwrite!(self.tables.tables);
+    pub(crate) async fn interest_final(&self, msg: &Interest) {
+        let mut wtables = self.tables.tables.write().await;
         let tables = &mut *wtables;
 
         let mut ctx = DispatcherContext {
@@ -464,16 +416,4 @@ pub(crate) async fn declare_interest<'a>(
             }
         }
     }
-}
-
-pub(crate) async fn undeclare_interest(
-    hat_code: &(dyn HatTrait + Send + Sync),
-    tables: &TablesLock,
-    face: &mut Arc<FaceState>,
-    id: InterestId,
-) {
-    tracing::debug!("{} Undeclare interest {}", face, id,);
-    unregister_expr_interest(tables, face, id).await;
-    let mut wtables = tables.tables.write().await;
-    hat_code.undeclare_interest(&mut wtables, face, id);
 }

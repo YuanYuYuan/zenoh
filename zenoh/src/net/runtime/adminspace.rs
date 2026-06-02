@@ -185,7 +185,6 @@ impl AdminSpace {
     pub async fn start(runtime: &Runtime) {
         let zid_str = runtime.state.zid.to_string();
         let whatami_str = runtime.state.whatami.to_str();
-        let config = &mut runtime.config().lock();
         let root_key: OwnedKeyExpr = format!("@/{zid_str}/{whatami_str}").try_into().unwrap();
 
         let mut handlers: HashMap<OwnedKeyExpr, (Handler, OwnedKeyExpr)> = HashMap::new();
@@ -242,7 +241,7 @@ impl AdminSpace {
         });
 
         {
-            let config = &mut runtime.config().lock().0;
+            let config: &mut zenoh_config::Config = &mut *runtime.config().lock();
             config.set_plugin_validator(Arc::downgrade(&admin));
         }
 
@@ -321,9 +320,12 @@ impl AdminSpace {
             });
         }
 
-        let _span =
-            tracing::debug_span!("adminspace", zid = %ZenohIdProto::from(admin.zid).short())
-                .entered();
+        {
+            let _span =
+                tracing::debug_span!("adminspace", zid = %ZenohIdProto::from(admin.zid).short())
+                    .entered();
+            tracing::debug!("AdminSpace started");
+        }
 
         let primitives = runtime.state.router.new_session(admin.clone());
         zlock!(admin.primitives).replace(primitives.clone());
@@ -453,9 +455,8 @@ impl Primitives for AdminSpace {
         trace!("recv Request {:?}", msg);
         match &mut msg.payload {
             RequestBody::Query(query) => {
-                let _span =
-                    tracing::debug_span!("adminspace", zid = %ZenohIdProto::from(self.zid).short())
-                        .entered();
+                tracing::debug_span!("adminspace", zid = %ZenohIdProto::from(self.zid).short())
+                    .in_scope(|| tracing::debug!("recv Request"));
                 let primitives = zlock!(self.primitives).as_ref().unwrap().clone();
                 let read_allowed = {
                     let conf = &self.context.runtime.state.config.lock();
@@ -533,47 +534,7 @@ impl Primitives for AdminSpace {
     }
 }
 
-impl crate::net::primitives::EPrimitives for AdminSpace {
-    #[inline]
-    fn send_interest(&self, ctx: crate::net::routing::RoutingContext<&mut Interest>) -> bool {
-        (self as &dyn Primitives).send_interest(ctx.msg);
-        false
-    }
-
-    #[inline]
-    fn send_declare(&self, ctx: crate::net::routing::RoutingContext<&mut Declare>) -> bool {
-        (self as &dyn Primitives).send_declare(ctx.msg);
-        false
-    }
-
-    #[inline]
-    fn send_push(&self, msg: &mut Push, reliability: Reliability) -> bool {
-        (self as &dyn Primitives).send_push(msg, reliability);
-        false
-    }
-
-    #[inline]
-    fn send_request(&self, msg: &mut Request) -> bool {
-        (self as &dyn Primitives).send_request(msg);
-        false
-    }
-
-    #[inline]
-    fn send_response(&self, msg: &mut Response) -> bool {
-        (self as &dyn Primitives).send_response(msg);
-        false
-    }
-
-    #[inline]
-    fn send_response_final(&self, msg: &mut ResponseFinal) -> bool {
-        (self as &dyn Primitives).send_response_final(msg);
-        false
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-}
+// EPrimitives is an alias for Primitives (see primitives/mod.rs), so no separate impl needed.
 
 #[tracing::instrument(level = "trace", skip_all)]
 fn local_data(prefix: &keyexpr, context: &AdminContext, query: Query) {
@@ -764,7 +725,7 @@ where
     F: Fn(&Tables) -> HashMap<Arc<Resource>, Sources>,
 {
     let tables = &context.runtime.state.router.tables;
-    let rtables = zread!(tables.tables);
+    let rtables = tables.tables.read_blocking();
     for res in f(&rtables) {
         let key = prefix / keyexpr::new(res.0.expr()).unwrap();
         if query.key_expr().intersects(&key) {
@@ -811,7 +772,7 @@ fn tokens_data(prefix: &keyexpr, context: &AdminContext, query: Query) {
 #[tracing::instrument(level = "trace", skip_all)]
 fn linkstate_data(prefix: &keyexpr, context: &AdminContext, query: Query) {
     let tables = &context.runtime.state.router.tables;
-    let rtables = zread!(tables.tables);
+    let rtables = tables.tables.read_blocking();
 
     for (region, hat) in rtables
         .hats
@@ -844,7 +805,7 @@ fn route_successor(prefix: &keyexpr, context: &AdminContext, query: Query) {
         }
     };
     let tables = &context.runtime.state.router.tables;
-    let rtables = zread!(tables.tables);
+    let rtables = tables.tables.read_blocking();
 
     // Try to shortcut full successor retrieval if suffix matches 'src/<zid>/dst/<zid>' pattern.
 

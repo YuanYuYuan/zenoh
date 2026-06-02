@@ -1295,8 +1295,9 @@ impl PipelineConsumer for SplitTransmissionPipelineConsumer {
     }
 
     fn drain(&mut self) -> Vec<(BoxedWBatch, Priority)> {
-        let current = self.stage_out.s_in.current.clone();
-        let batches = self.stage_out.drain(&mut current.lock().unwrap());
+        let shared = self.stage_out.s_in.shared.clone();
+        let mut current_guard = zlock!(shared.current);
+        let batches = self.stage_out.drain(&mut current_guard);
         batches.into_iter().map(|b| (b, self.priority)).collect()
     }
 }

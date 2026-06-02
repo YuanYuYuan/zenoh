@@ -14,23 +14,26 @@
 use std::{any::Any, cell::OnceCell, sync::Arc};
 
 use arc_swap::ArcSwapOption;
+use async_trait::async_trait;
 use zenoh_link::Link;
 use zenoh_protocol::{
     core::ZenohIdProto,
     network::{
-        ext, Declare, DeclareBody, DeclareFinal, NetworkBodyMut, NetworkMessageExt as _,
+        ext, response, Declare, DeclareBody, DeclareFinal, NetworkBodyMut, NetworkMessageExt as _,
         NetworkMessageMut, ResponseFinal,
     },
 };
 use zenoh_result::ZResult;
 
-use zenoh_transport::{unicast::TransportUnicast, TransportPeerEventHandler};
+use zenoh_transport::{
+    unicast::TransportUnicast, MessageHandlerAsync, TransportPeerEventHandler,
+};
 
 use super::Primitives;
 use crate::net::routing::{
     dispatcher::face::Face,
     gateway::{InterceptorCacheValueType, Resource},
-    hat::{DispatcherContext, HatTrait},
+    hat::DispatcherContext,
     interceptor::{has_interceptor, InterceptorContext, InterceptorTrait, InterceptorsChain},
     RoutingContext,
 };
@@ -70,6 +73,7 @@ impl DeMuxContext<'_> {
         let wire_expr = wire_expr.to_owned();
         let tables = self.demux.face.tables.tables.try_read()?;
         tables
+            .data
             .get_mapping(&self.demux.face.state, &wire_expr.scope, wire_expr.mapping)
             .cloned()
     }
@@ -139,7 +143,7 @@ impl TransportPeerEventHandler for DeMux {
                             tokio::spawn(async move {
                                 primitives.send_response_final(ResponseFinal {
                                     rid: request_id,
-                                    ext_qos: response::ext::QoSType::RESPONSE_FINAL,
+                                    ext_qos: response::ext::QoSType::DEFAULT,
                                     ext_tstamp: None,
                                 }).await;
                             });
@@ -220,25 +224,44 @@ impl TransportPeerEventHandler for DeMux {
                 });
             }
             NetworkBodyMut::OAM(m) => {
-                if let Some(transport) = self.transport.as_ref() {
+                if self.transport.is_some() {
                     // Spawn async work since TransportPeerEventHandler trait methods are sync
                     let face = self.face.clone();
-                    let transport = transport.clone();
                     let mut oam = m.clone();
                     tokio::spawn(async move {
-                        let mut declares = vec![];
+                        use crate::net::routing::hat::{DispatcherContext as DC, HatTrait};
+                        type DeclareVec = Vec<(
+                            Arc<dyn super::Primitives + Send + Sync>,
+                            RoutingContext<zenoh_protocol::network::Declare>,
+                        )>;
+                        let mut declares: DeclareVec = vec![];
                         let ctrl_lock = face.tables.ctrl_lock.lock().await;
-                        let mut tables = face.tables.tables.write().await;
-                        if let Err(e) = face.tables.hat_code.handle_oam(
-                            &mut tables,
-                            &face.tables,
+                        let mut wtables = face.tables.tables.write().await;
+                        let tables = &mut *wtables;
+                        let region = face.state.region;
+                        let (owner_hat, other_hats) =
+                            match tables.hats.partition_mut(&region) {
+                                Some(pair) => pair,
+                                None => {
+                                    tracing::error!("OAM: no hat for region {:?}", region);
+                                    return;
+                                }
+                            };
+                        let mut face_state_arc = face.state.clone();
+                        let ctx = DC {
+                            tables_lock: &face.tables,
+                            tables: &mut tables.data,
+                            src_face: &mut face_state_arc,
+                            send_declare: &mut |p, m| declares.push((p.clone(), m)),
+                        };
+                        if let Err(e) = owner_hat.handle_oam(
+                            ctx,
                             &mut oam,
-                            &transport,
-                            &mut |p, m| declares.push((p.clone(), m)),
+                            other_hats.map(|hat| hat.as_mut() as &mut dyn HatTrait),
                         ) {
                             tracing::error!("Error handling OAM: {}", e);
                         }
-                        drop(tables);
+                        drop(wtables);
                         drop(ctrl_lock);
                         for (p, m) in declares {
                             let _ = p.send_declare(m.msg).await;
@@ -265,5 +288,16 @@ impl TransportPeerEventHandler for DeMux {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+/// Async message handler — used by the single-task RX driver (non-uring path).
+///
+/// This simply delegates to `handle_message`, which already uses `block_in_place`
+/// for synchronous-ordering messages and spawns tasks for fire-and-forget ones.
+#[async_trait]
+impl MessageHandlerAsync for DeMux {
+    async fn on_message(&self, msg: NetworkMessageMut<'_>) -> ZResult<()> {
+        self.handle_message(msg)
     }
 }

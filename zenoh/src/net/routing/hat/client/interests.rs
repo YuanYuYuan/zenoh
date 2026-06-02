@@ -39,7 +39,6 @@ use crate::net::routing::{
         DispatcherContext, HatBaseTrait, HatInterestTrait, HatTrait, Remote,
         RouteCurrentDeclareResult, RouteInterestResult,
     },
-    RoutingContext,
 };
 impl Hat {
     #[tracing::instrument(level = "debug", skip_all, ret)]
@@ -63,10 +62,10 @@ impl Hat {
             let wire_expr = res
                 .as_ref()
                 .map(|res| Resource::decl_key(res, ctx.src_face));
-            ctx.src_face
-                .primitives
-                .send_interest(RoutingContext::with_expr(
-                    &mut Interest {
+            let primitives = ctx.src_face.primitives.clone();
+            tokio::spawn(async move {
+                primitives
+                    .send_interest(Interest {
                         id,
                         mode: InterestMode::CurrentFuture,
                         options,
@@ -74,11 +73,9 @@ impl Hat {
                         ext_qos: interest::ext::QoSType::INTEREST,
                         ext_tstamp: None,
                         ext_nodeid: interest::ext::NodeIdType::DEFAULT,
-                    },
-                    res.as_ref()
-                        .map(|res| res.expr().to_string())
-                        .unwrap_or_default(),
-                ));
+                    })
+                    .await;
+            });
         }
     }
 }
@@ -144,20 +141,22 @@ impl HatInterestTrait for Hat {
             let wire_expr = res
                 .as_ref()
                 .map(|res| Resource::decl_key(res, &mut dst_face));
-            dst_face.primitives.send_interest(RoutingContext::with_expr(
-                &mut Interest {
-                    id,
-                    mode: msg.mode,
-                    options: msg.options,
-                    wire_expr,
-                    ext_qos: interest::ext::QoSType::INTEREST,
-                    ext_tstamp: None,
-                    ext_nodeid: interest::ext::NodeIdType::DEFAULT,
-                },
-                res.as_ref()
-                    .map(|res| res.expr().to_string())
-                    .unwrap_or_default(),
-            ));
+            let primitives = dst_face.primitives.clone();
+            let msg_mode = msg.mode;
+            let msg_options = msg.options;
+            tokio::spawn(async move {
+                primitives
+                    .send_interest(Interest {
+                        id,
+                        mode: msg_mode,
+                        options: msg_options,
+                        wire_expr,
+                        ext_qos: interest::ext::QoSType::INTEREST,
+                        ext_tstamp: None,
+                        ext_nodeid: interest::ext::NodeIdType::DEFAULT,
+                    })
+                    .await;
+            });
         } else {
             tracing::debug!("Client region is empty");
         }
@@ -188,24 +187,24 @@ impl HatInterestTrait for Hat {
         {
             dst_face.local_interests.retain(|id, local_interest| {
                 if local_interest == remote_interest {
-                    dst_face.primitives.send_interest(RoutingContext::with_expr(
-                        &mut Interest {
-                            id: *id,
-                            mode: InterestMode::Final,
-                            // NOTE: InterestMode::Final options are undefined in the current protocol specification,
-                            // they are initialized here for internal use by local egress interceptors.
-                            options: remote_interest.options,
-                            wire_expr: None,
-                            ext_qos: interest::ext::QoSType::INTEREST,
-                            ext_tstamp: None,
-                            ext_nodeid: interest::ext::NodeIdType::DEFAULT,
-                        },
-                        local_interest
-                            .res
-                            .as_ref()
-                            .map(|res| res.expr().to_string())
-                            .unwrap_or_default(),
-                    ));
+                    let primitives = dst_face.primitives.clone();
+                    let id = *id;
+                    let options = remote_interest.options;
+                    tokio::spawn(async move {
+                        primitives
+                            .send_interest(Interest {
+                                id,
+                                mode: InterestMode::Final,
+                                // NOTE: InterestMode::Final options are undefined in the current protocol specification,
+                                // they are initialized here for internal use by local egress interceptors.
+                                options,
+                                wire_expr: None,
+                                ext_qos: interest::ext::QoSType::INTEREST,
+                                ext_tstamp: None,
+                                ext_nodeid: interest::ext::NodeIdType::DEFAULT,
+                            })
+                            .await;
+                    });
                     return false;
                 }
                 true

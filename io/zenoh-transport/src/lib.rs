@@ -100,7 +100,7 @@ pub async fn run_unicast_rx_driver(handle: RxHandle, handler: Arc<dyn MessageHan
             tokio::select! {
                 result = tokio::time::timeout(
                     lease,
-                    link_rx.recv_batch(|| pool.try_take().unwrap_or_else(|| pool.alloc()))
+                    link_rx.recv_batch(|| pool.try_take().unwrap_or_else(|| pool.alloc()), None)
                 ) => {
                     let batch = result
                         .map_err(|_| zerror!("{}: link lease expired after {}ms", link, lease.as_millis()))??;

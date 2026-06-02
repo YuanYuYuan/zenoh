@@ -308,9 +308,9 @@ impl TransportManager {
         self.state
             .multicast
             .transports
-            .blocking_lock()
+            .lock_blocking()
             .values()
-            .map(|t| t.into())
+            .map(TransportMulticast::from)
             .collect()
     }
 

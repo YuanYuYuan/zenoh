@@ -299,7 +299,6 @@ impl Wait for ReplyErrBuilder<'_> {
                 }),
             }).await;
         });
-        });
         Ok(())
     }
 }

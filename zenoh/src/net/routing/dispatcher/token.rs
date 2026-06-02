@@ -28,105 +28,60 @@ use crate::net::routing::{
     hat::{DispatcherContext, RouteCurrentDeclareResult, SendDeclare},
 };
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn declare_token<'a>(
-    hat_code: &(dyn HatTrait + Send + Sync),
-    tables: &TablesLock,
-    face: &mut Arc<FaceState>,
-    id: TokenId,
-    expr: &'a WireExpr<'a>,
-    node_id: NodeId,
-    interest_id: Option<InterestId>,
-    send_declare: &'a mut SendDeclare<'a>,
-) {
-    let rtables = tables.tables.read().await;
-    match rtables
-        .get_mapping(face, &expr.scope, expr.mapping)
-        .cloned()
-    {
-        Some(mut prefix) => {
-            tracing::debug!(
-                "{} Declare token {} ({}{})",
-                face,
-                id,
-                prefix.expr(),
-                expr.suffix
+impl Face {
+    #[tracing::instrument(
+        level = "debug",
+        skip(self, send_declare),
+        fields(expr = %expr, node_id = node_id_as_source(node_id)),
+        ret
+    )]
+    pub(crate) async fn declare_token(
+        &self,
+        id: TokenId,
+        expr: &WireExpr<'_>,
+        node_id: NodeId,
+        interest_id: Option<InterestId>,
+        send_declare: &mut SendDeclare<'_>,
+    ) {
+        if interest_id.is_some() && self.state.region.bound().is_south() {
+            tracing::error!(
+                src = %self.state,
+                id = interest_id,
+                "Received token with interest id from south-bound face. \
+                This message should only flow downstream"
             );
-            let res = Resource::get_resource(&prefix, &expr.suffix);
-            let (mut res, mut wtables) =
-                if res.as_ref().map(|r| r.context.is_some()).unwrap_or(false) {
-                    drop(rtables);
-                    let wtables = tables.tables.write().await;
-                    (res.unwrap(), wtables)
-                } else {
-                    let mut fullexpr = prefix.expr().to_string();
-                    fullexpr.push_str(expr.suffix.as_ref());
-                    let mut matches = keyexpr::new(fullexpr.as_str())
-                        .map(|ke| Resource::get_matches(&rtables, ke))
-                        .unwrap_or_default();
-                    drop(rtables);
-                    let mut wtables = tables.tables.write().await;
-                    let mut res = Resource::make_resource(
-                        hat_code,
-                        &mut wtables,
-                        &mut prefix,
-                        expr.suffix.as_ref(),
-                    );
-                    matches.push(Arc::downgrade(&res));
-                    Resource::match_resource(&wtables, &mut res, matches);
-                    (res, wtables)
-                };
-
-            hat_code.declare_token(
-                &mut wtables,
-                face,
-                id,
-                &mut res,
-                node_id,
-                interest_id,
-                send_declare,
-            );
-            drop(wtables);
+            return;
         }
 
-pub(crate) async fn undeclare_token<'a>(
-    hat_code: &(dyn HatTrait + Send + Sync),
-    tables: &TablesLock,
-    face: &mut Arc<FaceState>,
-    id: TokenId,
-    expr: &'a ext::WireExprType,
-    node_id: NodeId,
-    send_declare: &'a mut SendDeclare<'a>,
-) {
-    let (res, mut wtables) = if expr.wire_expr.is_empty() {
-        (None, tables.tables.write().await)
-    } else {
-        let rtables = tables.tables.read().await;
-        match rtables
-            .get_mapping(face, &expr.wire_expr.scope, expr.wire_expr.mapping)
-            .cloned()
-        {
-            Some(mut prefix) => {
-                match Resource::get_resource(&prefix, expr.wire_expr.suffix.as_ref()) {
-                    Some(res) => {
-                        drop(rtables);
-                        (Some(res), tables.tables.write().await)
+        self.with_mapped_expr(expr, |tables, res| {
+            let region = self.state.region;
+
+            macro_rules! ctx {
+                () => {
+                    DispatcherContext {
+                        tables_lock: &self.tables,
+                        tables: &mut tables.data,
+                        src_face: &mut self.state.clone(),
+                        send_declare,
                     }
-                    None => {
-                        // Here we create a Resource that will immediately be removed after treatment
-                        // TODO this could be improved
-                        let mut fullexpr = prefix.expr().to_string();
-                        fullexpr.push_str(expr.wire_expr.suffix.as_ref());
-                        let mut matches = keyexpr::new(fullexpr.as_str())
-                            .map(|ke| Resource::get_matches(&rtables, ke))
-                            .unwrap_or_default();
-                        drop(rtables);
-                        let mut wtables = tables.tables.write().await;
-                        let mut res = Resource::make_resource(
-                            hat_code,
-                            &mut wtables,
-                            &mut prefix,
-                            expr.wire_expr.suffix.as_ref(),
+                };
+            }
+
+            let mut ctx = ctx!();
+
+            let src_zid = tables.hats[region].remote_node_id_to_zid(ctx.src_face, node_id);
+
+            match interest_id
+                .map(|id| tables.hats[region].route_current_token(ctx.reborrow(), id, res.clone()))
+            {
+                Some(RouteCurrentDeclareResult::Noop) => {} // ¯\_(ツ)_/¯
+                Some(RouteCurrentDeclareResult::Breadcrumb { interest }) => {
+                    if interest.mode.is_future() {
+                        tables.hats[region].register_token(
+                            ctx.reborrow(),
+                            id,
+                            res.clone(),
+                            node_id,
                         );
                     }
 
@@ -158,7 +113,7 @@ pub(crate) async fn undeclare_token<'a>(
                     }
                 }
             }
-        });
+        }).await;
     }
 
     #[tracing::instrument(
@@ -167,12 +122,12 @@ pub(crate) async fn undeclare_token<'a>(
         fields(expr = %expr.wire_expr, node_id = node_id_as_source(node_id)),
         ret
     )]
-    pub(crate) fn undeclare_token(
+    pub(crate) async fn undeclare_token(
         &self,
         id: TokenId,
         expr: &ext::WireExprType,
         node_id: NodeId,
-        send_declare: &mut SendDeclare,
+        send_declare: &mut SendDeclare<'_>,
     ) {
         // TODO: here we create a Resource that will immediately be removed after treatment, this
         // could be improved
@@ -219,6 +174,6 @@ pub(crate) async fn undeclare_token<'a>(
                     }
                 }
             },
-        );
+        ).await;
     }
 }
