@@ -408,7 +408,7 @@ impl TransportUnicastTrait for TransportUnicastUniversal {
             }
             .into();
 
-            p.push_transport_message(msg, Priority::Background);
+            p.push_transport_message(msg, Priority::Background).await;
         }
         // Terminate and clean up the transport
         self.delete().await

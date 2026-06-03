@@ -371,17 +371,21 @@ impl Gossip {
                 };
 
                 if let Some(idx) = idx {
-                    self.send_on_links(
-                        vec![(
-                            idx,
-                            Details {
-                                zid: true,
-                                locators: true,
-                                links: false,
-                            },
-                        )],
-                        |link| link.zid != zid,
-                    );
+                    if let Ok(msg) = self.make_msg(vec![(idx, Details { zid: true, locators: true, links: false })]) {
+                        let targets: Vec<_> = self.links.values()
+                            .filter(|link| link.transport.get_whatami().is_ok_and(|w| self.gossip_target.matches(w)) && link.zid != zid)
+                            .map(|link| link.transport.clone())
+                            .collect();
+                        let name = self.name.clone();
+                        zenoh_runtime::ZRuntime::Net.spawn(async move {
+                            let mut msg = zenoh_protocol::network::NetworkMessageExt::to_owned(&msg);
+                            for transport in targets {
+                                if let Err(e) = transport.schedule(msg.as_mut()).await {
+                                    tracing::debug!("{} Error sending LinkStateList: {}", name, e);
+                                }
+                            }
+                        });
+                    }
                 }
             }
 
@@ -536,7 +540,20 @@ impl Gossip {
             })
             .collect();
 
-        self.send_on_link(idxs, &transport);
+        if let Ok(msg) = self.make_msg(idxs) {
+            let gossip_target = self.gossip_target;
+            let name = self.name.clone();
+            if transport.get_whatami().is_ok_and(|w| gossip_target.matches(w)) {
+                let transport = transport.clone();
+                zenoh_runtime::ZRuntime::Net.spawn(async move {
+                    let mut msg = zenoh_protocol::network::NetworkMessageExt::to_owned(&msg);
+                    tracing::trace!("{} Send to {:?} {:?}", name, transport.get_zid(), msg);
+                    if let Err(e) = transport.schedule(msg.as_mut()).await {
+                        tracing::debug!("{} Error sending LinkStateList: {}", name, e);
+                    }
+                });
+            }
+        }
         free_index
     }
 

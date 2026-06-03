@@ -350,7 +350,8 @@ impl TransportLinkMulticastUniversal {
 
     pub(super) fn stop_tx(&mut self) {
         if let Some(pipeline) = self.pipeline.as_ref() {
-            pipeline.disable();
+            let pipeline = pipeline.clone();
+            zenoh_runtime::ZRuntime::TX.spawn(async move { pipeline.disable().await });
         }
     }
 

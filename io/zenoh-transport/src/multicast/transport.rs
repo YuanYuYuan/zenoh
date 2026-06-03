@@ -225,7 +225,7 @@ impl TransportMulticastInner {
                         session: false,
                     }
                     .into();
-                    pipeline.push_transport_message(msg, Priority::Background);
+                    pipeline.push_transport_message(msg, Priority::Background).await;
                 }
             }
         }
