@@ -87,7 +87,10 @@ impl ShmTransportMetadata {
     }
 
     fn protocols(&self) -> &[ProtocolID] {
-        &self.protocols[..self.id_count as usize]
+        // `RXAuthSegment::open` checks this bound, but the peer keeps write access to its
+        // own segment and can change the value afterwards. Clamp on every read.
+        let count = (self.id_count as usize).min(self.protocols.len());
+        &self.protocols[..count]
     }
 
     fn counter(&self, id: ShmCounterID) -> &AtomicU32 {
@@ -242,6 +245,26 @@ pub struct RXAuthSegment {
 impl RXAuthSegment {
     pub fn open(id: AuthSegmentID) -> ZResult<Self> {
         let segment = ShmTransportMetadataSegment::open(id)?;
+
+        // Reject a segment we cannot read. Callers treat this as "no SHM with this peer"
+        // and keep the link. Without it, a version skew or a corrupt segment is silent.
+        // `validate` never sees a peer segment: AuthUnicast::validate takes the local one.
+        let data = &segment.data;
+        if data.version != SHM_VERSION {
+            bail!(
+                "SHM version mismatch: ours {}, theirs {}",
+                SHM_VERSION,
+                data.version
+            );
+        }
+        if data.id_count as usize > data.protocols.len() {
+            bail!(
+                "SHM segment declares {} protocols. The maximum is {}",
+                data.id_count,
+                data.protocols.len()
+            );
+        }
+
         Ok(Self { segment })
     }
 
