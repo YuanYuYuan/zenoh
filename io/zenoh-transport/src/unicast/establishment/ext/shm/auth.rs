@@ -383,8 +383,15 @@ impl<'a> OpenFsm for &'a ShmFsm<'a> {
             return Ok(None);
         };
 
-        // Allocate TX counter for this session
-        let tx_handoff = TxHandoffChannel::new_tx(reliability, self.inner)?;
+        // Allocate TX counter for this session. The pool is finite. On exhaustion, give up
+        // SHM for this transport rather than close the link.
+        let tx_handoff = match TxHandoffChannel::new_tx(reliability, self.inner) {
+            Ok(tx_handoff) => tx_handoff,
+            Err(e) => {
+                tracing::warn!("{} Continuing without SHM: {}", S, e);
+                return Ok(None);
+            }
+        };
 
         let open_syn = OpenSyn {
             bob_challenge: rx_segment.challenge(),
@@ -592,8 +599,15 @@ impl<'a> AcceptFsm for &'a ShmFsm<'a> {
         // Link is multipriority
         let reliability = input;
 
-        // Allocate TX counter for this session
-        let tx_handoff = TxHandoffChannel::new_tx(reliability, self.inner)?;
+        // Allocate TX counter for this session. See send_open_syn: exhaustion gives up SHM
+        // rather than closing the link.
+        let tx_handoff = match TxHandoffChannel::new_tx(reliability, self.inner) {
+            Ok(tx_handoff) => tx_handoff,
+            Err(e) => {
+                tracing::warn!("{} Continuing without SHM: {}", S, e);
+                return Ok(None);
+            }
+        };
 
         let open_ack = OpenAck {
             bob_counters: tx_handoff.ids(),
