@@ -19,6 +19,7 @@
 //! [Click here for Zenoh's documentation](https://docs.rs/zenoh/latest/zenoh)
 pub use lazy_static::lazy_static;
 pub mod macros;
+pub use lock_tripwire as tracking;
 
 use std::future::{Future, IntoFuture, Ready};
 

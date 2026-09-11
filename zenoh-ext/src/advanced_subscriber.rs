@@ -621,6 +621,22 @@ impl<Receiver> std::ops::DerefMut for AdvancedSubscriber<Receiver> {
     }
 }
 
+/// Panics if a Zenoh synchronous lock guard is live on this thread.
+///
+/// Placed where this file calls out to code Zenoh does not control, which since
+/// the collect · release · call refactor is exactly one place:
+/// [`dispatch_outbox`].
+///
+/// Compiled out unless the `reentrancy-tripwire` feature is on; see that
+/// feature's note in `Cargo.toml`.
+#[zenoh_macros::unstable]
+#[inline]
+#[allow(unused_variables)]
+fn assert_safe_to_call_user_code(site: &str) {
+    #[cfg(feature = "reentrancy-tripwire")]
+    zenoh::internal::tracking::assert_no_locks_held(site);
+}
+
 /// One deferred call into user code.
 ///
 /// Each variant carries its own target, at the cost of a handle clone per call:
@@ -737,6 +753,7 @@ fn dispatch_outbox(statesref: &Arc<Mutex<State>>) {
         released: false,
     };
     loop {
+        assert_safe_to_call_user_code("AdvancedSubscriber::dispatch_outbox");
         for call in calls.drain(..) {
             match call {
                 Call::Sample(callback, sample) => callback.call(sample),
