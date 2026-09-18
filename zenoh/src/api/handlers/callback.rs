@@ -105,6 +105,11 @@ impl<T> Callback<T> {
     /// Call the inner callback.
     #[inline]
     pub fn call(&self, arg: T) {
+        // Demo instrumentation (not part of the real fix): a live clone of
+        // this `Callback` pins an on-drop permit for the whole call, which is
+        // exactly the M5 hazard's precondition. Modelled as a held resource
+        // spanning this invocation.
+        let _permit_held = lock_tripwire::hold_resource_at(concat!(file!(), ":", line!()));
         self.callable.call(arg)
     }
 
@@ -112,6 +117,7 @@ impl<T> Callback<T> {
     where
         T: CallbackParameter,
     {
+        let _permit_held = lock_tripwire::hold_resource_at(concat!(file!(), ":", line!()));
         self.callable.call_with_message(msg)
     }
 
