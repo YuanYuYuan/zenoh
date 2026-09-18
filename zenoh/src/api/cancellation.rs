@@ -123,7 +123,10 @@ impl SyncGroup {
             return;
         }
         let s = self.semaphore.clone();
-        let _p = ZRuntime::Application.block_in_place(s.acquire_many(Self::max_permits()));
+        let _p = lock_tripwire::invoke_user_callback!(
+            concat!(file!(), ":", line!()),
+            ZRuntime::Application.block_in_place(s.acquire_many(Self::max_permits()))
+        );
         self.close();
     }
 

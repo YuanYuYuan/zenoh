@@ -156,6 +156,9 @@ impl<T> Callback<T> {
     #[inline]
     pub fn call(&self, arg: T) {
         let _executing = ExecutingGroups::enter(&self.groups);
+        // Demo instrumentation (not part of the real fix): same as on `main`,
+        // for the tripwire comparison.
+        let _permit_held = lock_tripwire::hold_resource_at(concat!(file!(), ":", line!()));
         self.callable.call(arg)
     }
 
@@ -164,6 +167,7 @@ impl<T> Callback<T> {
         T: CallbackParameter,
     {
         let _executing = ExecutingGroups::enter(&self.groups);
+        let _permit_held = lock_tripwire::hold_resource_at(concat!(file!(), ":", line!()));
         self.callable.call_with_message(msg)
     }
 
