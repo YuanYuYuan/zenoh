@@ -1,7 +1,7 @@
 //! Ad hoc verification (not part of the crate's own test suite): does
 //! wiring `lock-tripwire` into the real M5 self-join mechanism catch it on
-//! unpatched `main`, and stay clean once `circle/zenoh#24`'s per-entity fix
-//! is applied?
+//! unpatched `main`, and stay clean once the per-entity fix in this PR is
+//! applied?
 //!
 //! Two real sites are instrumented in `zenoh/src`, not simulated here:
 //! `Callback::call`/`call_with_message` marks the on-drop permit implicitly
@@ -113,7 +113,7 @@ fn self_join_subscriber_undeclare_from_own_callback() {
             println!("CAUGHT by lock-tripwire, as expected pre-fix: {msg}");
         }
         Outcome::Completed => {
-            println!("COMPLETED cleanly, as expected post-fix (#24)");
+            println!("COMPLETED cleanly, as expected post-fix");
         }
         other => panic!("unexpected outcome: {other:?}"),
     }
