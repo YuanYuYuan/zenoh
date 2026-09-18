@@ -113,7 +113,7 @@ fn self_join_subscriber_undeclare_from_own_callback() {
             println!("CAUGHT by lock-tripwire, as expected pre-fix: {msg}");
         }
         Outcome::Completed => {
-            println!("COMPLETED cleanly, as expected post-fix (#24)");
+            println!("COMPLETED cleanly, as expected post-fix");
         }
         other => panic!("unexpected outcome: {other:?}"),
     }
