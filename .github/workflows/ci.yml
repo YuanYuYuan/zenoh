@@ -126,7 +126,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Update Stable Rust toolchain
-        run: rustup update stable
+        run: rustc +stable --version
 
       - name: Make sure necessary tools are installed
         run: |
