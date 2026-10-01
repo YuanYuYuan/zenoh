@@ -61,7 +61,12 @@ async fn shm_lazy_init_peer() {
 
 fn threads_after_open(mode: &str) -> usize {
     let output = Command::new(std::env::current_exe().unwrap())
-        .args(["shm_lazy_init_peer", "--nocapture", "--exact", "--include-ignored"])
+        .args([
+            "shm_lazy_init_peer",
+            "--nocapture",
+            "--exact",
+            "--include-ignored",
+        ])
         .env(PROBE, mode)
         .output()
         .expect("Failed to run peer in separate process");
